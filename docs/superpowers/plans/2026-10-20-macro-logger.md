@@ -2290,16 +2290,16 @@ Expected: every suite ends with `Test Suite 'All tests' passed` (or swift-testin
 Run: `xcodegen generate && xcodebuild -project Strand.xcodeproj -scheme Strand -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO test 2>&1 | tail -3 && xcodebuild -project Strand.xcodeproj -scheme NOOPiOS -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO build -quiet`
 Expected: `** TEST SUCCEEDED **`, iOS build succeeds.
 
-- [ ] **Step 3: Signed build and install** (uses `Config/BundleIdSecrets.xcconfig`, team `X7H8GVAD34`)
+- [ ] **Step 3: Signed build and install** (uses the gitignored `Config/BundleIdSecrets.xcconfig` for team and bundle prefix)
 
 ```bash
 xcodebuild -project Strand.xcodeproj -scheme NOOPiOS -destination 'generic/platform=iOS' \
   -allowProvisioningUpdates -derivedDataPath "$TMPDIR/noop-dd" build -quiet
-xcrun devicectl device install app --device C5646CFA-825E-5A06-A790-F58224E339A4 \
+xcrun devicectl device install app --device <DEVICE_ID from `xcrun devicectl list devices`> \
   "$TMPDIR/noop-dd/Build/Products/Debug-iphoneos/NOOP.app"
 ```
 
-Expected: `App installed: bundleID: com.dragosrebegea.noop`. The camera permission may need re-provisioning; `-allowProvisioningUpdates` handles it.
+Expected: `App installed: bundleID: <BUNDLE_ID_PREFIX>.noop`. The camera permission may need re-provisioning; `-allowProvisioningUpdates` handles it.
 
 - [ ] **Step 4: On-device checks (user)**
 
