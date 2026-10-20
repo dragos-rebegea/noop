@@ -4,12 +4,13 @@ import StrandDesign
 import StrandNutrition
 
 /// Hand entry in two modes: `.totals` (Quick add: the eaten amount's macros) and `.per100g`
-/// (a product or missed item: values per 100 g plus the amount eaten). Rejects negative values.
+/// (a missed item: values per 100 g plus the amount eaten) and `.product` (a product's values per
+/// 100 g only; the amount is chosen on the portion screen that follows). Rejects negative values.
 struct FoodManualEntryView: View {
-    enum Mode { case totals, per100g(grams: Double) }
+    enum Mode { case totals, per100g(grams: Double), product }
 
     let mode: Mode
-    /// name, values (totals or per 100 g, per mode), grams (nil in `.totals`)
+    /// name, values (totals or per 100 g, per mode), grams (only in `.per100g`)
     let onDone: (String, MacroPer100g, Double?) -> Void
 
     @State private var name = ""
@@ -19,11 +20,12 @@ struct FoodManualEntryView: View {
     @State private var fat: Double?
     @State private var grams: Double?
 
-    private var isPer100g: Bool { if case .per100g = mode { return true } else { return false } }
+    private var isPer100g: Bool { if case .totals = mode { return false } else { return true } }
+    private var asksAmount: Bool { if case .per100g = mode { return true } else { return false } }
     private var values: [Double?] { [kcal, protein, carbs, fat] }
     private var valid: Bool {
         values.contains { $0 != nil } && values.allSatisfy { ($0 ?? 0) >= 0 }
-            && (!isPer100g || (grams ?? 0) > 0)
+            && (!asksAmount || (grams ?? 0) > 0)
     }
 
     var body: some View {
@@ -34,11 +36,11 @@ struct FoodManualEntryView: View {
             field("Protein (g)", $protein)
             field("Carbs (g)", $carbs)
             field("Fat (g)", $fat)
-            if isPer100g { field("Amount eaten (g)", $grams) }
+            if asksAmount { field("Amount eaten (g)", $grams) }
             NoopButton(isPer100g ? "Save" : "Log", systemImage: "checkmark", kind: .primary) {
                 onDone(name.isEmpty ? String(localized: "Quick add") : name,
                        MacroPer100g(kcal: kcal ?? 0, protein: protein ?? 0, carbs: carbs ?? 0, fat: fat ?? 0),
-                       isPer100g ? grams : nil)
+                       asksAmount ? grams : nil)
             }
             .disabled(!valid)
         }

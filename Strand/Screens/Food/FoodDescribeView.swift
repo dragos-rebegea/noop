@@ -1,4 +1,5 @@
 #if os(iOS)
+import AVFoundation
 import SwiftUI
 import StrandDesign
 
@@ -12,7 +13,30 @@ struct FoodDescribeView: View {
     /// The text that was in the field when recording started; the live transcript appends to it.
     @State private var textBeforeVoice = ""
     @FocusState private var focused: Bool
+    /// Bumped after a permission prompt or a return from Settings, so `voiceState` is re-read.
+    @State private var permissionTick = 0
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
+    @Environment(\.scenePhase) private var scenePhase
+
+    /// Dictation needs both speech recognition and the microphone; each can be refused separately.
+    private enum VoiceState { case ready, needsPrompt, speechDenied, micDenied, unavailable }
+
+    private var voiceState: VoiceState {
+        _ = permissionTick
+        switch voice.authorization {
+        case .denied: return .speechDenied
+        case .unavailable: return .unavailable
+        case .notDetermined: return .needsPrompt
+        case .authorized: break
+        }
+        switch AVAudioApplication.shared.recordPermission {
+        case .denied: return .micDenied
+        case .undetermined: return .needsPrompt
+        default: break
+        }
+        return voice.canUseVoice ? .ready : .unavailable
+    }
 
     private var trimmed: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
 
@@ -62,6 +86,7 @@ struct FoodDescribeView: View {
                 }
             }
             .onAppear { focused = true }
+            .onChange(of: scenePhase) { _, phase in if phase == .active { permissionTick += 1 } }
             .onDisappear { if voice.isRecording { voice.stopTranscribing { _ in } } }
         }
     }
@@ -78,16 +103,36 @@ struct FoodDescribeView: View {
                     .symbolEffect(.pulse, isActive: voice.isRecording)
             }
             .buttonStyle(.plain)
-            .disabled(!(voice.canUseVoice || voice.authorization == .notDetermined))
+            .disabled(!(voice.isRecording || voiceState == .ready || voiceState == .needsPrompt))
             .sensoryFeedback(.selection, trigger: voice.isRecording)
             .accessibilityLabel(voice.isRecording ? String(localized: "Stop dictation") : String(localized: "Dictate"))
-            Text(voice.isRecording ? String(localized: "Listening. Tap to stop.")
-                                   : (voice.statusMessage ?? String(localized: "Tap to say what you ate. Transcribed on this iPhone.")))
+            Text(micHint)
                 .font(StrandFont.footnote)
                 .foregroundStyle(StrandPalette.textTertiary)
                 .multilineTextAlignment(.center)
+            if voiceState == .speechDenied || voiceState == .micDenied {
+                Button(String(localized: "Allow in Settings")) {
+                    if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
+                }
+                .font(StrandFont.footnote)
+                .foregroundStyle(StrandPalette.accent)
+            }
         }
         .frame(maxWidth: .infinity)
+    }
+
+    private var micHint: String {
+        if voice.isRecording { return String(localized: "Listening. Tap to stop.") }
+        switch voiceState {
+        case .ready, .needsPrompt:
+            return voice.statusMessage ?? String(localized: "Tap to say what you ate. Transcribed on this iPhone.")
+        case .speechDenied:
+            return String(localized: "Speech recognition is off for NOOP, so dictation can't start. You can still type.")
+        case .micDenied:
+            return String(localized: "Microphone access is off for NOOP, so dictation can't start. You can still type.")
+        case .unavailable:
+            return voice.statusMessage ?? String(localized: "Dictation on this iPhone isn't available for your language. You can still type.")
+        }
     }
 
     private func toggleVoice() {
@@ -98,9 +143,13 @@ struct FoodDescribeView: View {
         focused = false
         textBeforeVoice = trimmed
         let start = { voice.startTranscribing { partial in apply(partial) } }
-        if voice.authorization == .notDetermined {
-            voice.requestAuthorization { state in if state == .authorized { start() } }
-        } else {
+        if voiceState == .needsPrompt {
+            // Asks for speech recognition and then the microphone, each only if not yet decided.
+            voice.requestAuthorization { state in
+                permissionTick += 1
+                if state == .authorized, voice.canUseVoice { start() }
+            }
+        } else if voiceState == .ready {
             start()
         }
     }

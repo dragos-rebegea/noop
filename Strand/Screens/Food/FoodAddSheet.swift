@@ -64,6 +64,15 @@ struct FoodAddSheet: View {
     @State private var warningTick = 0
     /// Identifies the in-flight Claude or lookup request; a result for an older one is dropped.
     @State private var requestToken = UUID()
+    /// A photo is being taken or loaded and has not been handed to a step yet.
+    @State private var busy = false
+    /// A food-log write is in flight; a second Log tap is ignored until it returns.
+    @State private var saving = false
+    /// Bumped on every deferred presentation and every newly opened step, so a stale deferral
+    /// never presents over a newer screen.
+    @State private var transitionGen = 0
+    /// Why the last save from an open sheet failed, shown inside that sheet.
+    @State private var sheetError: String?
 
     // Review state: the header and Claude's items (nil while working).
     @State private var reviewHeader: FoodReviewView.Header = .text("")
@@ -74,6 +83,7 @@ struct FoodAddSheet: View {
     var body: some View {
         FoodCaptureView(
             mode: $mode, scanner: scanner, labelBarcode: labelBarcode, suggestions: suggestions, toast: toast,
+            busy: busy,
             onClose: { dismiss() },
             onShutter: shutter,
             onLibrary: { requestAnthropic(.library(libraryPurposeForMode)) },
@@ -97,15 +107,45 @@ struct FoodAddSheet: View {
             guard let item else { return }
             libraryItem = nil
             let purpose = libraryPurpose
+            let token = UUID()
+            requestToken = token
+            busy = true
             Task {
-                if let data = try? await item.loadTransferable(type: Data.self) { process(data, purpose) }
+                let data = try? await item.loadTransferable(type: Data.self)
+                busy = false
+                guard requestToken == token, step == nil else { return }
+                if let data { process(data, purpose, token: token) }
                 else { show(String(localized: "Couldn't open that photo."), warning: true) }
             }
         }
-        .sheet(item: $step) { s in sheet(for: s) }
+        .sheet(item: $step, onDismiss: {
+            // A swipe-dismissed sheet abandons its request; a sheet swapped for the next step does not.
+            if step == nil { requestToken = UUID() }
+        }) { s in
+            sheet(for: s)
+                .safeAreaInset(edge: .top) {
+                    if let sheetError {
+                        Text(sheetError)
+                            .font(StrandFont.footnote)
+                            .foregroundStyle(StrandPalette.statusCritical)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, NoopMetrics.screenPadding)
+                            .padding(.vertical, NoopMetrics.space2)
+                            .background(StrandPalette.surfaceRaised)
+                    }
+                }
+        }
+        .onChange(of: step?.id) { _, id in
+            sheetError = nil
+            if id != nil { transitionGen += 1 }
+        }
+        // Nothing scans or lights the torch behind a sheet, the notice or the photo picker.
+        .onChange(of: coversCamera) { _, covered in covered ? scanner.pause() : scanner.resume() }
         .onAppear { scanner.onBarcode = handleScanned }
         .task { await loadSuggestions() }
     }
+
+    private var coversCamera: Bool { step != nil || showAnthropicNotice || showLibrary }
 
     private var libraryPurposeForMode: PhotoPurpose {
         if mode == .label, let code = labelBarcode { return .label(barcode: code) }
@@ -129,10 +169,13 @@ struct FoodAddSheet: View {
 
     /// Closes any open sheet first: an alert or picker asked for while a sheet is still up never shows.
     private func afterSheetCloses(_ action: @escaping () -> Void) {
+        transitionGen += 1
+        let gen = transitionGen
         guard step != nil else { action(); return }
         step = nil
         Task {
             try? await Task.sleep(nanoseconds: 600_000_000)
+            guard transitionGen == gen, step == nil else { return }
             action()
         }
     }
@@ -141,12 +184,19 @@ struct FoodAddSheet: View {
         pendingAnthropicAction = nil
         switch action {
         case .capture(let purpose):
+            guard !busy else { return }
+            let token = UUID()
+            requestToken = token
+            busy = true
             Task {
-                guard let data = await scanner.capture() else {
+                let data = await scanner.capture()
+                busy = false
+                guard requestToken == token, step == nil else { return }
+                guard let data else {
                     show(String(localized: "Couldn't take the photo. Try again."), warning: true)
                     return
                 }
-                process(data, purpose)
+                process(data, purpose, token: token)
             }
         case .library(let purpose):
             libraryPurpose = purpose
@@ -173,7 +223,7 @@ struct FoodAddSheet: View {
     /// Live barcodes: Barcode mode looks the product up at once; Label mode remembers the code
     /// the nutrition-table photo will be filed under. Ignored while a sheet is open.
     private func handleScanned(_ code: String) {
-        guard step == nil, !showAnthropicNotice else { return }
+        guard step == nil, !showAnthropicNotice, !showLibrary, !busy else { return }
         switch mode {
         case .barcode:
             successTick += 1
@@ -238,10 +288,8 @@ struct FoodAddSheet: View {
             NavigationStack {
                 FoodPortionView(name: p.name, per100g: p.per100g, servingGrams: p.servingGrams, lastGrams: last,
                                 today: model.totals, targets: model.targets) { g in
-                    Task {
-                        let source = p.origin == "label" ? "label" : (p.origin == "manual" ? "quick" : "barcode")
-                        finish(await model.log([.init(name: p.name, grams: g, per100g: p.per100g, source: source, productId: p.id)]))
-                    }
+                    let source = p.origin == "label" ? "label" : (p.origin == "manual" ? "quick" : "barcode")
+                    save { await model.log([.init(name: p.name, grams: g, per100g: p.per100g, source: source, productId: p.id)]) }
                 }
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar { cancelItem }
@@ -272,7 +320,9 @@ struct FoodAddSheet: View {
             }
         case .manualProduct(let code):
             NavigationStack {
-                FoodManualEntryView(mode: .per100g(grams: 100)) { name, per100g, grams in
+                // Save only builds and caches the product; the food is logged from the portion screen.
+                FoodManualEntryView(mode: .product) { name, per100g, _ in
+                    let started = step?.id
                     Task {
                         // Cache under the barcode so the next scan of this product works offline.
                         let row = FoodProductRow(id: code, deviceId: FoodLog.deviceId, name: name, brand: nil,
@@ -280,8 +330,8 @@ struct FoodAddSheet: View {
                                                  carbs100: per100g.carbs, fat100: per100g.fat, servingGrams: nil,
                                                  origin: "manual", updatedAt: Int(Date().timeIntervalSince1970))
                         if let store = await model.store() { try? await store.upsertFoodProduct(row) }
-                        finish(await model.log([.init(name: name, grams: grams ?? 100, per100g: per100g,
-                                                      source: "quick", productId: code)]))
+                        guard step?.id == started else { return }
+                        step = .portion(row, lastGrams: nil)
                     }
                 }
                 .navigationTitle(String(localized: "Per 100 g"))
@@ -303,7 +353,7 @@ struct FoodAddSheet: View {
                                                   carbs: r.carbsG / g * 100, fat: r.fatG / g * 100)
                         FoodPortionView(name: r.name, per100g: per100, servingGrams: nil, lastGrams: g,
                                         today: model.totals, targets: model.targets) { newG in
-                            Task { finish(await model.relog(r, grams: newG)) }
+                            save { await model.relog(r, grams: newG) }
                         }
                     } else {
                         quickAddForm
@@ -317,8 +367,8 @@ struct FoodAddSheet: View {
 
     private var quickAddForm: some View {
         FoodManualEntryView(mode: .totals) { name, v, _ in
-            Task { finish(await model.quickAdd(name: name, macros: Macros(kcal: v.kcal, protein: v.protein,
-                                                                          carbs: v.carbs, fat: v.fat))) }
+            save { await model.quickAdd(name: name, macros: Macros(kcal: v.kcal, protein: v.protein,
+                                                                   carbs: v.carbs, fat: v.fat)) }
         }
     }
 
@@ -330,11 +380,30 @@ struct FoodAddSheet: View {
 
     // MARK: Results
 
-    /// Dismiss only when the write succeeded; otherwise show why and stay open.
-    private func finish(_ ok: Bool) {
-        step = nil
-        if ok { successTick += 1; dismiss() }
-        else { show(model.errorMessage ?? String(localized: "Couldn't save. Try again."), warning: true) }
+    /// Runs one save for the open sheet. Dismisses only when the write succeeded and that sheet is
+    /// still the one showing; on failure the sheet stays open with its values and shows why.
+    private func save(_ op: @escaping () async -> Bool) {
+        guard !saving else { return }
+        saving = true
+        let started = step?.id
+        Task {
+            let ok = await op()
+            saving = false
+            let failure = model.errorMessage ?? String(localized: "Couldn't save. Try again.")
+            guard step?.id == started else {
+                // The sheet that asked was closed meanwhile: report the outcome over the camera.
+                if ok { successTick += 1; show(String(localized: "Logged")) } else { show(failure, warning: true) }
+                return
+            }
+            if ok {
+                successTick += 1
+                step = nil
+                dismiss()
+            } else {
+                warningTick += 1
+                sheetError = failure
+            }
+        }
     }
 
     /// A short message over the camera that clears itself.
@@ -349,24 +418,23 @@ struct FoodAddSheet: View {
         }
     }
 
-    private func startReview(header: FoodReviewView.Header, source: String) {
+    private func startReview(header: FoodReviewView.Header, source: String, token: UUID = UUID()) {
         model.errorMessage = nil
         reviewHeader = header
         reviewItems = nil
         reviewSource = source
         reviewAt = Date()
-        requestToken = UUID()
+        requestToken = token
         step = .review
     }
 
-    private func process(_ data: Data, _ purpose: PhotoPurpose) {
+    /// Hands a photo to its step. `token` is the request taken before the photo was captured or loaded.
+    private func process(_ data: Data, _ purpose: PhotoPurpose, token: UUID) {
         switch purpose {
         case .meal:
-            startReview(header: UIImage(data: data).map { .photo($0) } ?? .text(""), source: "photo")
-            let token = requestToken
+            startReview(header: UIImage(data: data).map { .photo($0) } ?? .text(""), source: "photo", token: token)
             Task { await handleMealPhoto(data, token: token) }
         case .label(let barcode):
-            let token = UUID()
             requestToken = token
             step = .working(String(localized: "Reading the nutrition table..."))
             Task { await handleLabel(data, barcode: barcode, token: token) }
@@ -393,6 +461,8 @@ struct FoodAddSheet: View {
                                      carbs100: l.per100g.carbs, fat100: l.per100g.fat,
                                      servingGrams: l.servingGrams, origin: "label",
                                      updatedAt: Int(Date().timeIntervalSince1970))
+            // An abandoned read writes nothing, not even the product cache.
+            guard requestToken == token else { return }
             if let store = await model.store() { try await store.upsertFoodProduct(row) }
             guard requestToken == token else { return }
             labelBarcode = nil
@@ -447,12 +517,16 @@ struct FoodAddSheet: View {
     private func loadSuggestions() async {
         guard let store = await model.store() else { return }
         let now = Date()
-        let from = FoodDay.key(for: now.addingTimeInterval(-30 * 86_400))
-        guard let rows = try? await store.foodEntries(deviceId: FoodLog.deviceId, from: from, to: FoodDay.key(for: now))
+        let calendar = Calendar.current
+        // Today plus the 29 calendar days before it: exactly 30 day keys, whatever the DST shifts.
+        let start = calendar.date(byAdding: .day, value: -29, to: calendar.startOfDay(for: now)) ?? now
+        let from = FoodDay.key(for: start, calendar: calendar)
+        guard let rows = try? await store.foodEntries(deviceId: FoodLog.deviceId, from: from,
+                                                      to: FoodDay.key(for: now, calendar: calendar))
         else { return }
         let ranked = TimeOfDaySuggestions.rank(
             rows.map { (name: $0.name, productId: $0.productId, loggedAt: Date(timeIntervalSince1970: TimeInterval($0.loggedAt))) },
-            now: now, calendar: .current, limit: 8)
+            now: now, calendar: calendar, limit: 8)
         suggestions = ranked.map { rows[$0] }
     }
 }

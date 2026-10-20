@@ -31,10 +31,22 @@ final class FoodScannerController: ObservableObject {
     /// Called for every newly recognised EAN/UPC barcode; the owner decides what it means.
     var onBarcode: ((String) -> Void)?
     fileprivate weak var scanner: DataScannerViewController?
+    /// Paused while a sheet, alert or picker covers the camera.
+    private var paused = false
+    /// After a resume the scanner re-reports codes still in view; the last one reported is
+    /// ignored for a moment so cancelling a product does not reopen it at once.
+    private var lastReported: String?
+    private var resumedAt = Date.distantPast
 
     init() { availability = Self.currentAvailability() }
 
-    var hasTorch: Bool { AVCaptureDevice.default(for: .video)?.hasTorch ?? false }
+    private var torchDevice: AVCaptureDevice? {
+        guard let d = AVCaptureDevice.default(for: .video), d.hasTorch, d.isTorchModeSupported(.on) else { return nil }
+        return d
+    }
+
+    /// True only when this camera has a torch that can be switched on.
+    var hasTorch: Bool { torchDevice != nil }
 
     static func currentAvailability() -> Availability {
         guard DataScannerViewController.isSupported else { return .unsupported }
@@ -50,32 +62,77 @@ final class FoodScannerController: ObservableObject {
         if availability == .needsPermission {
             _ = await AVCaptureDevice.requestAccess(for: .video)
         }
+        refresh()
+    }
+
+    /// Re-reads camera access, for example after the user changed it in Settings.
+    func refresh() {
         availability = Self.currentAvailability()
+        syncTorch()
     }
 
     /// A still from the live scanner as JPEG, kept in memory only.
     func capture() async -> Data? {
         guard let scanner else { return nil }
+        if paused || !scanner.isScanning {
+            resume()
+            // Give the session a moment to deliver frames again before taking the still.
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
         do { return try await scanner.capturePhoto().jpegData(compressionQuality: 0.9) } catch { return nil }
     }
 
-    func toggleTorch() {
-        guard let device = AVCaptureDevice.default(for: .video), device.hasTorch else { return }
+    func toggleTorch() { setTorch(!torchOn) }
+
+    private func setTorch(_ on: Bool) {
+        guard let device = torchDevice else { torchOn = false; return }
+        if on, !device.isTorchAvailable { syncTorch(); return }
         do {
             try device.lockForConfiguration()
-            device.torchMode = torchOn ? .off : .on
+            device.torchMode = on ? .on : .off
             device.unlockForConfiguration()
-            torchOn.toggle()
         } catch {}
+        syncTorch()
+    }
+
+    /// Mirrors the real torch state (the system can turn it off, for example when it overheats).
+    private func syncTorch() {
+        torchOn = torchDevice?.torchMode == .on
+    }
+
+    /// Stops scanning and turns the torch off while something covers the camera.
+    func pause() {
+        guard !paused else { return }
+        paused = true
+        if torchOn { setTorch(false) }
+        scanner?.stopScanning()
+    }
+
+    func resume() {
+        guard paused else { return }
+        paused = false
+        resumedAt = Date()
+        if let scanner, availability == .ready { try? scanner.startScanning() }
+    }
+
+    fileprivate func report(_ code: String) {
+        if code == lastReported, Date().timeIntervalSince(resumedAt) < 2 { return }
+        lastReported = code
+        onBarcode?(code)
+    }
+
+    fileprivate func becameUnavailable() {
+        torchOn = false
+        refresh()
     }
 
     fileprivate func attach(_ vc: DataScannerViewController) {
         scanner = vc
-        try? vc.startScanning()
+        if !paused { try? vc.startScanning() }
     }
 
     fileprivate func detach() {
-        if torchOn { toggleTorch() }
+        if torchOn { setTorch(false) }
         scanner?.stopScanning()
         scanner = nil
     }
@@ -111,10 +168,14 @@ private struct FoodScannerSurface: UIViewControllerRepresentable {
         func dataScanner(_ s: DataScannerViewController, didAdd items: [RecognizedItem], allItems: [RecognizedItem]) {
             for case .barcode(let b) in items {
                 if let code = b.payloadStringValue, !code.isEmpty {
-                    controller.onBarcode?(code)
+                    controller.report(code)
                     return
                 }
             }
+        }
+
+        func dataScanner(_ s: DataScannerViewController, becameUnavailableWithError error: DataScannerViewController.ScanningUnavailable) {
+            controller.becameUnavailable()
         }
     }
 }
@@ -129,6 +190,8 @@ struct FoodCaptureView: View {
     let suggestions: [FoodEntryRow]
     /// A transient confirmation ("Logged") or an explanation of what went wrong.
     let toast: String?
+    /// A photo is being taken or loaded: capture actions are disabled until it is handed off.
+    let busy: Bool
     let onClose: () -> Void
     let onShutter: () -> Void
     let onLibrary: () -> Void
@@ -138,6 +201,7 @@ struct FoodCaptureView: View {
     let onAdjust: (FoodEntryRow) -> Void
 
     @Environment(\.openURL) private var openURL
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         Group {
@@ -150,6 +214,8 @@ struct FoodCaptureView: View {
         .overlay(alignment: .top) { toastView }
         .animation(StrandMotion.gentle, value: toast)
         .task { await scanner.prepare() }
+        // Camera access may have been turned on in Settings while NOOP was in the background.
+        .onChange(of: scenePhase) { _, phase in if phase == .active { scanner.refresh() } }
     }
 
     // MARK: Camera
@@ -161,10 +227,13 @@ struct FoodCaptureView: View {
             VStack(spacing: NoopMetrics.space3) {
                 topBar
                 Spacer()
-                hint
-                suggestionRow
-                modeSwitcher
-                bottomControls
+                Group {
+                    hint
+                    suggestionRow
+                    modeSwitcher
+                    bottomControls
+                }
+                .disabled(busy)
             }
             .padding(.bottom, NoopMetrics.space2)
         }
@@ -190,6 +259,7 @@ struct FoodCaptureView: View {
                     .background(.ultraThinMaterial, in: Capsule())
             }
             .buttonStyle(.plain)
+            .disabled(busy)
         }
         .padding(.horizontal, NoopMetrics.screenPadding)
         .padding(.top, NoopMetrics.space2)
@@ -271,6 +341,8 @@ struct FoodCaptureView: View {
                     ZStack {
                         Circle().stroke(StrandPalette.onDarkPrimary, lineWidth: NoopMetrics.space1)
                         Circle().fill(StrandPalette.onDarkPrimary).padding(NoopMetrics.space2)
+                            .opacity(busy ? StrandPalette.disabledOpacity : 1)
+                        if busy { ProgressView().tint(StrandPalette.surfaceBase) }
                     }
                 }
                 .buttonStyle(StrandPressableButtonStyle(cornerRadius: shutterSize / 2, scale: 0.92))
@@ -368,6 +440,7 @@ struct FoodCaptureView: View {
             .padding(.horizontal, NoopMetrics.space8)
             Spacer(minLength: 0)
 
+            Group {
             if !suggestions.isEmpty {
                 VStack(alignment: .leading, spacing: NoopMetrics.space2) {
                     Text("Log again")
@@ -389,6 +462,8 @@ struct FoodCaptureView: View {
             }
             .padding(.horizontal, NoopMetrics.screenPadding)
             .padding(.bottom, NoopMetrics.space4)
+            }
+            .disabled(busy)
         }
         .background(StrandPalette.surfaceBase.ignoresSafeArea())
     }
