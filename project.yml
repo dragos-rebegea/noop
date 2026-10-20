@@ -52,6 +52,8 @@ packages:
     path: Packages/WhoopStore
   StrandAnalytics:
     path: Packages/StrandAnalytics
+  StrandNutrition:
+    path: Packages/StrandNutrition
   StrandImport:
     path: Packages/StrandImport
   StrandDesign:
@@ -152,6 +154,7 @@ targets:
       - package: WhoopProtocol
       - package: WhoopStore
       - package: StrandAnalytics
+      - package: StrandNutrition
       - package: StrandImport
       - package: StrandDesign
       - package: MarkdownUI
@@ -358,6 +361,7 @@ targets:
       - package: WhoopProtocol
       - package: WhoopStore
       - package: StrandAnalytics
+      - package: StrandNutrition
       - package: StrandImport
       - package: StrandDesign
       - package: MarkdownUI

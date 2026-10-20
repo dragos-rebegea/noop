@@ -1103,6 +1103,42 @@ extension WhoopStore {
         migrator.registerMigration("v47-rr-whoop5-fill") { db in
             try db.execute(sql: WhoopStore.whoop5RrFillMigrationSQL)
         }
+        // v48: macro logger (iOS v1). One row per logged food item plus a local product cache
+        // (barcode lookups and Claude-read labels) so a re-scan works offline. Every table carries
+        // `deviceId` (the fixed "noop-food" owner) so DeviceRegistryStore.deviceScopedTables clears it.
+        // Timestamps are unix seconds; ids are client-generated TEXT. Pinned ios_only in
+        // schema_oracle.json until the Android port lands.
+        migrator.registerMigration("v48-food-log") { db in
+            try db.create(table: "foodEntry", options: [.ifNotExists]) { t in
+                t.column("id", .text).primaryKey()
+                t.column("deviceId", .text).notNull()
+                t.column("day", .text).notNull()          // local calendar day yyyy-MM-dd
+                t.column("loggedAt", .integer).notNull()  // unix seconds
+                t.column("name", .text).notNull()
+                t.column("grams", .double)                // NULL for Quick add totals
+                t.column("kcal", .double).notNull()
+                t.column("proteinG", .double).notNull()
+                t.column("carbsG", .double).notNull()
+                t.column("fatG", .double).notNull()
+                t.column("source", .text).notNull()       // photo / barcode / recent / quick / label
+                t.column("productId", .text)
+            }
+            try db.create(index: "idx_foodEntry_day", on: "foodEntry",
+                          columns: ["deviceId", "day"], options: [.ifNotExists])
+            try db.create(table: "foodProduct", options: [.ifNotExists]) { t in
+                t.column("id", .text).primaryKey()        // barcode, or custom:<uuid>
+                t.column("deviceId", .text).notNull()
+                t.column("name", .text).notNull()
+                t.column("brand", .text)
+                t.column("kcal100", .double).notNull()
+                t.column("protein100", .double).notNull()
+                t.column("carbs100", .double).notNull()
+                t.column("fat100", .double).notNull()
+                t.column("servingGrams", .double)
+                t.column("origin", .text).notNull()       // off / label / manual
+                t.column("updatedAt", .integer).notNull() // unix seconds
+            }
+        }
         return migrator
     }
 }
