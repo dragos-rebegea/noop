@@ -53,10 +53,11 @@ these are features, not a count of individual requests or destinations.
 
 | Path / platforms | Default and trigger | What is sent | Destination |
 | --- | --- | --- | --- |
-| AI Coach / macOS, iOS, Android (§1.1a) | Unconfigured initially; requests after provider setup for chat, model refresh or enabled briefs | Provider authentication when required; conversation text; health summaries only with data consent; optional chart attachment on Apple/Gemini | Chosen provider or Custom server |
+| AI Coach / macOS, iOS, Android (§1.1a) | Unconfigured initially; requests after provider setup for chat, model refresh or enabled briefs | Provider authentication when required; conversation text; health summaries only with data consent; optional chart attachment on Apple/Gemini; a meal or nutrition-label photo when the user taps Photo in Food logging (Anthropic provider only, sent once, not stored); with data consent on, a text summary of the food log (today's items and totals, targets, the previous 6 days' totals) | Chosen provider or Custom server |
 | Oura history import / opt-in macOS, iOS build (§1.1b) | Compiled out by default; user starts authorization/import | OAuth credentials, authorization/refresh tokens and history query parameters; no existing NOOP health data | `cloud.ouraring.com`, `api.ouraring.com` |
 | Update check / macOS, iOS, Android (§1.1c) | Automatic check **on by default**, at most daily after onboarding/Terms; manual check on tap | Public release `GET`; no health data or app-added user/account identifier | `api.github.com` |
 | Self-hosted push / Android (§1.1d) | Experimental, **off by default**; configured export after offload/launch or on tap; explicit connection test | Bearer authentication; capability `GET`; versioned health batches with local installation/device IDs on export | User-owned HTTP(S) endpoint |
+| Food barcode lookup / iOS (§1.1e) | **Off by default**; runs when the user scans a barcode not already in the on-device product cache | The barcode number and a fixed `User-Agent`; no health data, no identifiers | `world.openfoodfacts.org` |
 
 **Platform services are a separate boundary.** Apple's workout route view uses `MKMapView`
 (`Strand/Screens/WorkoutDetailView.swift`), which can load map data for the displayed region.
@@ -213,6 +214,16 @@ not a NOOP cloud, account, restore path, or two-way sync:
 
 The repository ships the Android client and protocol document, not a server. The feature remains
 Experimental and default-off under the boundary in [`SCOPE.md`](SCOPE.md).
+
+#### 1.1e Food barcode lookup (iOS)
+
+Settings > Food logging > "Look up barcodes on Open Food Facts" (default off). When on, scanning a
+barcode that is not in the local `foodProduct` cache sends one `GET` to
+`https://world.openfoodfacts.org/api/v2/product/<barcode>.json` requesting only the name, brand,
+serving size and nutriment fields. The result is cached on the device; later scans of the same
+product make no request. Turning the switch off stops new lookups; cached products keep working.
+Food photos are not part of this path: they go only to the user's configured Anthropic provider,
+only when the user taps Photo, and are never written to disk.
 
 ### 1.2 The macOS sandbox (and what it means for the AI Coach and the Oura import)
 
