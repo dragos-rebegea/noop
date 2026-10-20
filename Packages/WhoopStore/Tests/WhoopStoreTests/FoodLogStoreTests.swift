@@ -127,4 +127,19 @@ final class FoodLogStoreTests: XCTestCase {
         let rows = try await store.foodEntries(deviceId: FoodLog.deviceId, from: "2026-10-18", to: "2026-10-20")
         XCTAssertEqual(rows.map(\.id), ["a", "b"])
     }
+
+    func testDeleteAllDataClearsFood() async throws {
+        let store = try await WhoopStore.inMemory()
+        try await store.insertFoodEntries([entry("a")])
+        try await store.upsertFoodProduct(FoodProductRow(id: "1", deviceId: FoodLog.deviceId, name: "x", brand: nil,
+            kcal100: 1, protein100: 0, carbs100: 0, fat100: 0, servingGrams: nil, origin: "manual", updatedAt: 1))
+        try await store.deleteAllData(deviceId: FoodLog.deviceId)
+        let entries = try await store.foodEntries(deviceId: FoodLog.deviceId, day: "2026-10-20")
+        let product = try await store.foodProduct(id: "1")
+        let totals = try await store.metricSeries(deviceId: FoodLog.deviceId, key: "calories_in",
+                                                  from: "2026-10-20", to: "2026-10-20")
+        XCTAssertTrue(entries.isEmpty)
+        XCTAssertNil(product)
+        XCTAssertTrue(totals.isEmpty)
+    }
 }

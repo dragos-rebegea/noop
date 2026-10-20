@@ -4,6 +4,7 @@ import Security
 import WhoopStore
 import StrandAnalytics
 import StrandImport
+import StrandNutrition
 
 // MARK: - AI Coach (the one networked feature, strictly opt-in, bring-your-own-key)
 //
@@ -961,6 +962,7 @@ final class AICoachEngine: ObservableObject {
         // with consent on), so it rides the SAME consent + text-only channel as the HRV/RHR summary, a
         // derived number, never raw R-R egress. Omitted when there aren't enough clean beats yet.
         if let line = await stressIndexLine() { ctx += "\n\n" + line }
+        if let food = await foodLogBlock() { ctx += "\n\n" + food }
         if includeOnDeviceSignals {
             let block = await onDeviceSignalsBlock()
             if !block.isEmpty { ctx += "\n\n" + block }
@@ -986,6 +988,49 @@ final class AICoachEngine: ObservableObject {
     /// One summary number, labelled, with a plain-English note that it's an autonomic-balance proxy.
     static func stressIndexSummary(si: Double) -> String {
         "Stress (SI): \(Int(si.rounded())) (Baevsky Stress Index over today's R-R; higher means more sympathetic / under load; an autonomic-balance proxy, not a clinical figure)."
+    }
+
+    /// The food-log block for the coach context: today's items, today's totals vs the user's targets, and
+    /// the daily totals of the previous days that have entries. Text only, under the same `dataConsent`
+    /// gate as the other summaries. nil when nothing is logged in the window, so the block is absent.
+    func foodLogBlock(days: Int = 7) async -> String? {
+        guard let store = await repo.storeHandle() else { return nil }
+        let today = FoodDay.key(for: Date())
+        let from = FoodDay.key(for: Calendar.current.date(byAdding: .day, value: -(days - 1), to: Date()) ?? Date())
+        let entries = (try? await store.foodEntries(deviceId: FoodLog.deviceId, from: from, to: today)) ?? []
+        let d = UserDefaults.standard
+        let targets = Macros(kcal: d.double(forKey: FoodLogModel.targetKeys.kcal),
+                             protein: d.double(forKey: FoodLogModel.targetKeys.protein),
+                             carbs: d.double(forKey: FoodLogModel.targetKeys.carbs),
+                             fat: d.double(forKey: FoodLogModel.targetKeys.fat))
+        return Self.foodLogSummary(entries: entries, today: today, targets: targets)
+    }
+
+    /// Pure formatter for the food-log block, unit-testable without a store.
+    static func foodLogSummary(entries: [FoodEntryRow], today: String, targets: Macros) -> String? {
+        guard !entries.isEmpty else { return nil }
+        func line(_ m: Macros) -> String {
+            String(format: "%.0f kcal, protein %.0f g, carbs %.0f g, fat %.0f g", m.kcal, m.protein, m.carbs, m.fat)
+        }
+        var out = ["Food log (logged in NOOP):"]
+        let todays = entries.filter { $0.day == today }.sorted { $0.loggedAt < $1.loggedAt }
+        out.append("Today so far: " + line(todays.map(\.macros).sum()))
+        if targets.kcal > 0 || targets.protein > 0 || targets.carbs > 0 || targets.fat > 0 {
+            out.append("Daily targets: " + line(targets))
+        }
+        if !todays.isEmpty {
+            let items = todays.map { e in e.grams.map { "\(e.name) \(Int($0.rounded())) g" } ?? e.name }
+            out.append("Today's items: " + items.joined(separator: "; "))
+        }
+        let earlier = Dictionary(grouping: entries.filter { $0.day < today }, by: \.day).sorted { $0.key < $1.key }
+        if !earlier.isEmpty {
+            out.append("Previous days (only days with entries):")
+            for (day, rows) in earlier {
+                let m = rows.map(\.macros).sum()
+                out.append(String(format: "%@: %.0f kcal, P %.0f, C %.0f, F %.0f", day, m.kcal, m.protein, m.carbs, m.fat))
+            }
+        }
+        return out.joined(separator: "\n")
     }
 
     /// A SUMMARY-ONLY block of the new on-device signals, the user's strongest n-of-1 correlations

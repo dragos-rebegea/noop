@@ -23,6 +23,7 @@ struct MetricDescriptor: Identifiable, Hashable {
         case "apple-health": return "Apple Health"
         case "xiaomi-band":  return "Mi Band"
         case "nutrition-csv": return String(localized: "Nutrition")
+        case "noop-food":    return String(localized: "Food log")
         case "noop-mood":    return String(localized: "Mood")
         default:             return "Whoop"   // "my-whoop" + on-device computed sources
         }
@@ -187,6 +188,12 @@ enum MetricCatalog {
         d("protein_g", String(localized: "Protein"), "Nutrition", "g", "nutrition-csv", "p.circle", 0, nil),
         d("carbs_g", String(localized: "Carbs"), "Nutrition", "g", "nutrition-csv", "c.circle", 0, nil),
         d("fat_g", String(localized: "Fat"), "Nutrition", "g", "nutrition-csv", "f.circle", 0, nil),
+
+        // Nutrition logged in-app (macro logger, metricSeries deviceId "noop-food")
+        d("calories_in", String(localized: "Calories In"), "Nutrition", "kcal", "noop-food", "fork.knife", 0, nil),
+        d("protein_g", String(localized: "Protein"), "Nutrition", "g", "noop-food", "p.circle", 0, nil),
+        d("carbs_g", String(localized: "Carbs"), "Nutrition", "g", "noop-food", "c.circle", 0, nil),
+        d("fat_g", String(localized: "Fat"), "Nutrition", "g", "noop-food", "f.circle", 0, nil),
 
         // ── Mind (daily mood check-in, 1–5; non-clinical self-tracking)
         d("mood", String(localized: "Mood"), "Mind", "/5", "noop-mood", "face.smiling", 0, true),

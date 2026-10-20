@@ -153,6 +153,12 @@ struct SettingsView: View {
     // Hydration tracker (opt-in, MVP). Default OFF — when off the hydration dashboard card + detail are
     // hidden. Mirrors the Android pref so the toggle reads the same on both platforms.
     @AppStorage(HydrationStore.enabledKey) private var hydrationEnabled = false
+    @AppStorage(FoodProductLookup.offEnabledKey) private var foodLookupEnabled = false
+    @AppStorage(FoodLogModel.targetKeys.kcal) private var foodTargetKcal = 0.0
+    @AppStorage(FoodLogModel.targetKeys.protein) private var foodTargetProtein = 0.0
+    @AppStorage(FoodLogModel.targetKeys.carbs) private var foodTargetCarbs = 0.0
+    @AppStorage(FoodLogModel.targetKeys.fat) private var foodTargetFat = 0.0
+    @State private var confirmFoodDelete = false
 
     /// Opt-in "Auto-detect workouts" (default OFF). When ON, Today scans the last day or two of HR for a
     /// sustained-elevated window and offers — via a single dismissible card — to save it as a workout.
@@ -264,6 +270,9 @@ struct SettingsView: View {
                 profileCard.staggeredAppear(index: 0)
                 unitsCard.staggeredAppear(index: 1)
                 appearanceCard.staggeredAppear(index: 2)
+                #if os(iOS)
+                foodLoggingCard
+                #endif
                 strapCard.staggeredAppear(index: 3)
                 #if os(iOS)
                 liveNotificationsCard.staggeredAppear(index: 3)
@@ -1377,6 +1386,52 @@ struct SettingsView: View {
             }
         }
     }
+
+    #if os(iOS)
+    private var foodLoggingCard: some View {
+        SettingsSection(icon: "fork.knife", title: "Food logging",
+                        blurb: "Daily macro targets and barcode lookup. Everything is stored on this iPhone.") {
+            VStack(alignment: .leading, spacing: NoopMetrics.space3) {
+                Toggle(isOn: $foodLookupEnabled) {
+                    VStack(alignment: .leading, spacing: NoopMetrics.spaceHalf) {
+                        Text("Look up barcodes on Open Food Facts")
+                            .font(StrandFont.subhead).foregroundStyle(StrandPalette.textPrimary)
+                        Text("Sends only the barcode number of a product you haven't scanned before. Off by default.")
+                            .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
+                    }
+                }
+                .toggleStyle(.switch).tint(StrandPalette.accent)
+                Divider().overlay(StrandPalette.hairline)
+                targetField("Calories (kcal)", $foodTargetKcal)
+                targetField("Protein (g)", $foodTargetProtein)
+                targetField("Carbs (g)", $foodTargetCarbs)
+                targetField("Fat (g)", $foodTargetFat)
+                Divider().overlay(StrandPalette.hairline)
+                Button(role: .destructive) { confirmFoodDelete = true } label: {
+                    Text("Delete all food data").font(StrandFont.subhead)
+                }
+                .confirmationDialog("Delete all logged food, saved products and food totals?",
+                                    isPresented: $confirmFoodDelete, titleVisibility: .visible) {
+                    Button("Delete", role: .destructive) {
+                        Task {
+                            guard let store = await model.repo.storeHandle() else { return }
+                            try? await store.deleteAllData(deviceId: FoodLog.deviceId)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func targetField(_ label: LocalizedStringKey, _ value: Binding<Double>) -> some View {
+        HStack {
+            Text(label).font(StrandFont.subhead).foregroundStyle(StrandPalette.textPrimary)
+            Spacer()
+            TextField("0", value: value, format: .number)
+                .keyboardType(.numberPad).multilineTextAlignment(.trailing).frame(width: 90)
+        }
+    }
+    #endif
 
     #if os(iOS)
     /// Apply the alternate-icon choice. Runs on the main actor (UIKit requirement) and tolerates the

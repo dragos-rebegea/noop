@@ -191,6 +191,7 @@ targets:
       - package: WhoopProtocol
       - package: WhoopStore
       - package: OuraProtocol
+      - package: StrandNutrition
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
