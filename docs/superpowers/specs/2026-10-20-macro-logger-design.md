@@ -7,7 +7,7 @@ upstream PR later (issue-first per `AGENTS.md`).
 
 Track daily calories, protein, carbs and fat with the least possible friction: snap a photo of a
 meal, scan a barcode, re-log a recent food, or type macros directly. Logged totals land in the same
-daily nutrition series the CSV import already feeds, so Compare, Explore and Coach use them unchanged.
+daily nutrition series (`metricSeries`, same keys) the CSV import feeds, under their own source `noop-food`; four `noop-food` catalog descriptors (label "Food log") make them appear in Compare and Explore. Coach does not read nutrition in v1.
 
 ## Decisions
 
@@ -66,7 +66,7 @@ daily nutrition series the CSV import already feeds, so Compare, Explore and Coa
 Daily totals: after every insert, update or delete of a `foodEntry`, the store recomputes that day
 and upserts `metricSeries` rows under `deviceId = "noop-food"` with the existing keys `calories_in`,
 `protein_g`, `carbs_g`, `fat_g`. When a day has no entries left, its four `noop-food` rows are
-deleted. The `nutrition-csv` source is never touched. Where both sources have a day, the metric
+deleted. The `nutrition-csv` source is never touched. Settings > Food logging > "Delete all food data" calls `deleteAllData(deviceId: "noop-food")`, which clears entries, products and totals. Where both sources have a day, the metric
 catalog shows each source distinctly, as it does for other multi-source metrics today.
 
 Targets are four numbers in `UserDefaults` (`food.target.kcal`, `.proteinG`, `.carbsG`, `.fatG`).
@@ -79,7 +79,7 @@ recency, carrying the most recent grams.
 
 ### Photo
 
-1. Photo button opens the camera (or photo library).
+1. Photo opens the camera; "From library" opens `PhotosPicker`. Every photo (meal or label, camera or library) passes one gate: Anthropic credentials, then the one-time notice.
 2. Image downscaled to max 1024 px long edge, JPEG, sent once to the Anthropic Messages API with a
    JSON-schema structured output: `items: [{name, grams, kcal100, protein100, carbs100, fat100,
    confidence: low|medium|high}]`. The model is the one selected in Coach.
@@ -120,6 +120,8 @@ cached with `origin = label` under the scanned barcode.
 | Offline | Cached products and Recent work; Photo and new barcodes show an offline message and offer Quick add. |
 | Product not found / incomplete | Offer label photo or manual entry; result cached under the barcode. |
 | Claude reply malformed, empty or refused | "Couldn't read this photo" with Retry and Quick add. Nothing logged automatically. |
+| Claude 3.x model selected in Coach | Photo logging uses the provider default model instead (3.x models reject structured outputs). |
+| Save fails | Nothing is half-saved: multi-item photos insert in one transaction; the sheet stays open with the error. |
 | Implausible values | Flag and require explicit confirmation. Rule (in `StrandNutrition`): per 100 g, protein + carbs + fat > 100 g, or any value negative, or `abs(kcal - (4p + 4c + 9f)) > max(40, 0.25 * kcal)`. |
 | HTTP/network errors | Surfaced as a short message; never retried silently in the background. |
 
@@ -150,5 +152,5 @@ cached with `origin = label` under the scanned barcode.
 ## Out of scope (v1)
 
 Android port; activity-adjusted targets; meal sections and saved combinations; micronutrients;
-Apple Health dietary writeback; storing photos; text food search; weight-goal targets; OpenAI and
+Apple Health dietary writeback; storing photos; text food search; weight-goal targets; Coach reading nutrition; OpenAI and
 Gemini vision for food (Anthropic only in v1); `.noopbak` whitelist entries for targets.

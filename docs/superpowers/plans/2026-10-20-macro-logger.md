@@ -45,6 +45,8 @@
 | `Strand/Data/FoodProductLookup.swift` | Create | Cache-first barcode lookup, OFF fetch, settings keys. |
 | `Strand/Data/FoodLogModel.swift` | Create | `@MainActor` view model for the Food screens. |
 | `Strand/Screens/Food/*.swift` | Create | iOS-only screens (wrapped in `#if os(iOS)`). |
+| `Strand/Data/MetricCatalog.swift` | Modify | Four `noop-food` nutrition descriptors so logged totals reach Compare/Explore. |
+| `Strand/Data/DeviceRegistry.swift` (or the Settings delete flow) | Modify | "Delete all food data" purging `deviceId = noop-food`. |
 | `StrandiOS/App/RootTabView.swift` | Modify | `MoreDestination.food` + `MoreRow`. |
 | `Strand/Screens/SettingsView.swift` | Modify | Food logging section (iOS only). |
 | `StrandTests/AnthropicVisionTests.swift` | Create | Request shape + reply extraction tests. |
@@ -548,6 +550,9 @@ public enum FoodVisionReply {
     public enum Confidence: String, Codable, Sendable { case low, medium, high }
 
     public struct MealItem: Equatable, Sendable {
+        public init(name: String, grams: Double, per100g: MacroPer100g, confidence: Confidence) {
+            self.name = name; self.grams = grams; self.per100g = per100g; self.confidence = confidence
+        }
         public var name: String
         public var grams: Double
         public var per100g: MacroPer100g
@@ -900,6 +905,15 @@ git commit -m "feat(store): v48-food-log migration (foodEntry, foodProduct)"
         XCTAssertEqual(recent.first?.grams, 60) // most recent amount wins
     }
 
+    func testRejectsNegativeOrNonFinite() async throws {
+        let store = try await WhoopStore.inMemory()
+        do { try await store.insertFoodEntries([entry("a", kcal: -1)]); XCTFail("expected throw") }
+        catch is FoodLog.InvalidEntry {}
+        do { try await store.insertFoodEntries([entry("b", p: .nan)]); XCTFail("expected throw") }
+        catch is FoodLog.InvalidEntry {}
+        XCTAssertTrue(try await store.foodEntries(deviceId: FoodLog.deviceId, day: "2026-10-20").isEmpty)
+    }
+
     func testProductUpsertAndFetch() async throws {
         let store = try await WhoopStore.inMemory()
         let p = FoodProductRow(id: "5941234567890", deviceId: FoodLog.deviceId, name: "Oats", brand: nil,
@@ -933,6 +947,13 @@ public enum FoodLog {
     public static let deviceId = "noop-food"
     /// The existing nutrition metric keys (NutritionCsvImport), so Compare/Explore pick totals up.
     public static let metricKeys = ["calories_in", "protein_g", "carbs_g", "fat_g"]
+
+    /// Finite and non-negative in every component. The store rejects anything else.
+    public static func isValid(_ m: Macros) -> Bool {
+        [m.kcal, m.protein, m.carbs, m.fat].allSatisfy { $0.isFinite && $0 >= 0 }
+    }
+
+    public struct InvalidEntry: Error {}
 }
 
 public struct FoodEntryRow: Equatable, Codable, Sendable, Identifiable {
@@ -1001,6 +1022,7 @@ extension WhoopStore {
     /// Inserts entries and recomputes the totals of every day they touch, in one transaction.
     public func insertFoodEntries(_ rows: [FoodEntryRow]) async throws {
         guard !rows.isEmpty else { return }
+        guard rows.allSatisfy({ FoodLog.isValid($0.macros) }) else { throw FoodLog.InvalidEntry() }
         try syncWrite { db in
             for r in rows { try Self.writeFoodEntry(r, in: db) }
             for ref in Set(rows.map { FoodDayRef(deviceId: $0.deviceId, day: $0.day) }) {
@@ -1011,6 +1033,7 @@ extension WhoopStore {
 
     /// Replaces an existing entry; recomputes both its old and new day.
     public func updateFoodEntry(_ r: FoodEntryRow) async throws {
+        guard FoodLog.isValid(r.macros) else { throw FoodLog.InvalidEntry() }
         try syncWrite { db in
             let oldDay = try String.fetchOne(db, sql: "SELECT day FROM foodEntry WHERE id = ?", arguments: [r.id])
             try Self.writeFoodEntry(r, in: db)
@@ -1118,7 +1141,7 @@ extension WhoopStore {
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cd Packages/WhoopStore && swift test --filter FoodLogStoreTests`
-Expected: PASS (7 tests). Then the full suite: `swift test` (expected: all pass, no regressions).
+Expected: PASS (8 tests). Then the full suite: `swift test` (expected: all pass, no regressions).
 
 - [ ] **Step 5: Commit**
 
@@ -1139,7 +1162,7 @@ git commit -m "feat(store): food log CRUD with metricSeries day totals"
 
 ```swift
 import XCTest
-@testable import NOOP
+@testable import Strand
 
 final class AnthropicVisionTests: XCTestCase {
     func testRequestShape() throws {
@@ -1170,7 +1193,7 @@ final class AnthropicVisionTests: XCTestCase {
 }
 ```
 
-Check the app module name first: `grep -n "PRODUCT_MODULE_NAME\|PRODUCT_NAME" project.yml | head`. Use that module in `@testable import` (the product is `NOOP`; if the module is `Strand`, write `@testable import Strand`). Check that `StrandTests` sources are picked up by directory (no project.yml edit needed if the target uses `sources: StrandTests`).
+The app module is pinned to `Strand` (project.yml ~line 141), so the import is `@testable import Strand`. Check that `StrandTests` sources are picked up by directory (no project.yml edit needed if the target uses `sources: StrandTests`).
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -1320,7 +1343,10 @@ enum FoodVisionService {
             throw Unavailable.notAnthropic
         }
         guard let key = AIKeyStore.read(), !key.isEmpty else { throw Unavailable.noKey }
-        let model = UserDefaults.standard.string(forKey: "ai.model") ?? AIProvider.anthropic.defaultModel
+        let chosen = UserDefaults.standard.string(forKey: "ai.model") ?? AIProvider.anthropic.defaultModel
+        // Structured outputs are not supported on Claude 3.x models (still offered in the Coach picker),
+        // so fall back to the provider default for photo logging rather than failing every request.
+        let model = chosen.hasPrefix("claude-3") ? AIProvider.anthropic.defaultModel : chosen
         return (key, model)
     }
 
@@ -1367,6 +1393,8 @@ enum FoodProductLookup {
         case lookupDisabled
     }
 
+    struct LookupFailed: Error { let status: Int }
+
     static func lookup(barcode: String, store: WhoopStore, session: URLSession = .shared) async throws -> Outcome {
         if let cached = try await store.foodProduct(id: barcode) { return .product(cached) }
         guard offEnabled else { return .lookupDisabled }
@@ -1378,6 +1406,7 @@ enum FoodProductLookup {
         let (data, resp) = try await session.data(for: req)
         let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
         if status == 404 { return .notFound }
+        guard (200..<300).contains(status) else { throw LookupFailed(status: status) }
         switch try OpenFoodFacts.decode(data) {
         case .notFound:
             return .notFound
@@ -1426,7 +1455,9 @@ final class FoodLogModel: ObservableObject {
     static let targetKeys = (kcal: "food.target.kcal", protein: "food.target.proteinG",
                              carbs: "food.target.carbsG", fat: "food.target.fatG")
 
-    @Published var day: String = FoodDay.key(for: Date())
+    /// The day being shown. Recomputed on every load and before every write, so a screen left open
+    /// across midnight never files new food under yesterday.
+    @Published private(set) var day: String = FoodDay.key(for: Date())
     @Published private(set) var entries: [FoodEntryRow] = []
     @Published private(set) var recent: [FoodEntryRow] = []
     @Published var errorMessage: String?
@@ -1443,6 +1474,7 @@ final class FoodLogModel: ObservableObject {
     init(repo: Repository) { self.repo = repo }
 
     func load() async {
+        day = FoodDay.key(for: Date())
         guard let store = await repo.storeHandle() else { return }
         do {
             entries = try await store.foodEntries(deviceId: FoodLog.deviceId, day: day)
@@ -1451,34 +1483,47 @@ final class FoodLogModel: ObservableObject {
         } catch { errorMessage = error.localizedDescription }
     }
 
-    /// Logs `name` at `grams` of `per100g` (photo, barcode, label or recent source).
-    func log(name: String, grams: Double, per100g: MacroPer100g, source: String, productId: String?) async {
-        let m = per100g.scaled(grams: grams)
-        await insert(FoodEntryRow(id: UUID().uuidString, deviceId: FoodLog.deviceId, day: day,
-                                  loggedAt: Int(Date().timeIntervalSince1970), name: name, grams: grams,
-                                  kcal: m.kcal, proteinG: m.protein, carbsG: m.carbs, fatG: m.fat,
-                                  source: source, productId: productId))
+    /// One item to log at `grams` of a per-100 g food.
+    struct Pending { var name: String; var grams: Double; var per100g: MacroPer100g; var source: String; var productId: String? }
+
+    /// Logs all items in ONE transaction. Returns false (and sets `errorMessage`) when nothing was
+    /// saved, so callers dismiss only on success and a multi-item photo never half-saves.
+    @discardableResult
+    func log(_ items: [Pending]) async -> Bool {
+        let now = Date()
+        let rows = items.map { i -> FoodEntryRow in
+            let m = i.per100g.scaled(grams: i.grams)
+            return FoodEntryRow(id: UUID().uuidString, deviceId: FoodLog.deviceId, day: FoodDay.key(for: now),
+                                loggedAt: Int(now.timeIntervalSince1970), name: i.name, grams: i.grams,
+                                kcal: m.kcal, proteinG: m.protein, carbsG: m.carbs, fatG: m.fat,
+                                source: i.source, productId: i.productId)
+        }
+        return await insert(rows)
     }
 
     /// Quick add: totals typed by hand.
-    func quickAdd(name: String, macros m: Macros) async {
-        await insert(FoodEntryRow(id: UUID().uuidString, deviceId: FoodLog.deviceId, day: day,
-                                  loggedAt: Int(Date().timeIntervalSince1970), name: name, grams: nil,
-                                  kcal: m.kcal, proteinG: m.protein, carbsG: m.carbs, fatG: m.fat,
-                                  source: "quick", productId: nil))
+    @discardableResult
+    func quickAdd(name: String, macros m: Macros) async -> Bool {
+        let now = Date()
+        return await insert([FoodEntryRow(id: UUID().uuidString, deviceId: FoodLog.deviceId, day: FoodDay.key(for: now),
+                                          loggedAt: Int(now.timeIntervalSince1970), name: name, grams: nil,
+                                          kcal: m.kcal, proteinG: m.protein, carbsG: m.carbs, fatG: m.fat,
+                                          source: "quick", productId: nil)])
     }
 
     /// Re-logs a recent entry, optionally at a new amount (scales its macros linearly).
-    func relog(_ r: FoodEntryRow, grams: Double? = nil) async {
+    @discardableResult
+    func relog(_ r: FoodEntryRow, grams: Double? = nil) async -> Bool {
         var m = r.macros
         if let g = grams, let old = r.grams, old > 0 {
             let f = g / old
             m = Macros(kcal: m.kcal * f, protein: m.protein * f, carbs: m.carbs * f, fat: m.fat * f)
         }
-        await insert(FoodEntryRow(id: UUID().uuidString, deviceId: FoodLog.deviceId, day: day,
-                                  loggedAt: Int(Date().timeIntervalSince1970), name: r.name, grams: grams ?? r.grams,
-                                  kcal: m.kcal, proteinG: m.protein, carbsG: m.carbs, fatG: m.fat,
-                                  source: "recent", productId: r.productId))
+        let now = Date()
+        return await insert([FoodEntryRow(id: UUID().uuidString, deviceId: FoodLog.deviceId, day: FoodDay.key(for: now),
+                                          loggedAt: Int(now.timeIntervalSince1970), name: r.name, grams: grams ?? r.grams,
+                                          kcal: m.kcal, proteinG: m.protein, carbsG: m.carbs, fatG: m.fat,
+                                          source: "recent", productId: r.productId)])
     }
 
     func delete(_ r: FoodEntryRow) async {
@@ -1489,10 +1534,21 @@ final class FoodLogModel: ObservableObject {
 
     func store() async -> WhoopStore? { await repo.storeHandle() }
 
-    private func insert(_ row: FoodEntryRow) async {
-        guard let store = await repo.storeHandle() else { return }
-        do { try await store.insertFoodEntries([row]) } catch { errorMessage = error.localizedDescription }
-        await load()
+    private func insert(_ rows: [FoodEntryRow]) async -> Bool {
+        guard rows.allSatisfy({ FoodLog.isValid($0.macros) && ($0.grams ?? 1) > 0 }) else {
+            errorMessage = String(localized: "Values must be zero or more.")
+            return false
+        }
+        guard let store = await repo.storeHandle() else { return false }
+        do {
+            try await store.insertFoodEntries(rows)
+            errorMessage = nil
+            await load()
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
     }
 }
 ```
@@ -1557,7 +1613,7 @@ All files in this task start with `#if os(iOS)` and end with `#endif`, so the sh
 - Create: `Strand/Screens/Food/FoodAddSheet.swift`
 - Create: `Strand/Screens/Food/FoodPhotoConfirmView.swift`
 - Create: `Strand/Screens/Food/FoodPortionView.swift`
-- Create: `Strand/Screens/Food/FoodQuickAddView.swift`
+- Create: `Strand/Screens/Food/FoodManualEntryView.swift`
 - Create: `Strand/Screens/Food/BarcodeScannerView.swift`
 - Create: `Strand/Screens/Food/CameraPicker.swift`
 
@@ -1729,32 +1785,40 @@ import StrandNutrition
 
 /// Check-and-adjust screen for Claude's meal estimate. Nothing is saved until Log.
 struct FoodPhotoConfirmView: View {
-    @State var items: [FoodVisionReply.MealItem]
+    struct Editable: Identifiable { let id = UUID(); var item: FoodVisionReply.MealItem }
+
+    @State private var items: [Editable]
     let onLog: ([FoodVisionReply.MealItem]) -> Void
     @State private var confirmedImplausible = false
+    @State private var addingMissed = false
 
-    private var flagged: Bool { items.contains { !Plausibility.issues($0.per100g).isEmpty } }
-    private var total: Macros { items.map { $0.per100g.scaled(grams: $0.grams) }.sum() }
+    init(items: [FoodVisionReply.MealItem], onLog: @escaping ([FoodVisionReply.MealItem]) -> Void) {
+        _items = State(initialValue: items.map { Editable(item: $0) })
+        self.onLog = onLog
+    }
+
+    private var flagged: Bool { items.contains { !Plausibility.issues($0.item.per100g).isEmpty } }
+    private var total: Macros { items.map { $0.item.per100g.scaled(grams: $0.item.grams) }.sum() }
 
     var body: some View {
         List {
-            ForEach($items, id: \.name) { $item in
+            ForEach($items) { $e in
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
-                        Text(item.name).font(StrandFont.subhead).foregroundStyle(StrandPalette.textPrimary)
-                        if item.confidence == .low || !Plausibility.issues(item.per100g).isEmpty {
+                        Text(e.item.name).font(StrandFont.subhead).foregroundStyle(StrandPalette.textPrimary)
+                        if e.item.confidence == .low || !Plausibility.issues(e.item.per100g).isEmpty {
                             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(StrandPalette.accent)
                         }
                         Spacer()
-                        Text(String(format: "%.0f g", item.grams))
+                        Text(String(format: "%.0f g", e.item.grams))
                             .font(StrandFont.bodyNumber).foregroundStyle(StrandPalette.textPrimary)
                     }
-                    Slider(value: $item.grams, in: 5...max(50, item.grams * 3), step: 5).tint(StrandPalette.accent)
+                    Slider(value: $e.item.grams, in: 5...max(50, e.item.grams * 3), step: 5).tint(StrandPalette.accent)
                     HStack {
-                        NoopButton("-25%", kind: .secondary) { item.grams = (item.grams * 0.75).rounded() }
-                        NoopButton("+25%", kind: .secondary) { item.grams = (item.grams * 1.25).rounded() }
+                        NoopButton("-25%", kind: .secondary) { e.item.grams = (e.item.grams * 0.75).rounded() }
+                        NoopButton("+25%", kind: .secondary) { e.item.grams = (e.item.grams * 1.25).rounded() }
                         Spacer()
-                        let m = item.per100g.scaled(grams: item.grams)
+                        let m = e.item.per100g.scaled(grams: e.item.grams)
                         Text(String(format: NSLocalizedString("%.0f kcal · P %.0f", comment: ""), m.kcal, m.protein))
                             .font(StrandFont.captionNumber).foregroundStyle(StrandPalette.textSecondary)
                     }
@@ -1762,6 +1826,7 @@ struct FoodPhotoConfirmView: View {
             }
             .onDelete { items.remove(atOffsets: $0) }
             Section {
+                NoopButton("Add a missed item", systemImage: "plus", kind: .secondary) { addingMissed = true }
                 Text(String(format: NSLocalizedString("Total: %.0f kcal · P %.0f g · C %.0f g · F %.0f g", comment: ""),
                             total.kcal, total.protein, total.carbs, total.fat))
                     .font(StrandFont.subhead).foregroundStyle(StrandPalette.textPrimary)
@@ -1769,20 +1834,25 @@ struct FoodPhotoConfirmView: View {
                     Toggle("Some values look unusual. I checked them.", isOn: $confirmedImplausible)
                         .tint(StrandPalette.accent)
                 }
-                NoopButton("Log", systemImage: "checkmark", kind: .primary) { onLog(items) }
+                NoopButton("Log", systemImage: "checkmark", kind: .primary) { onLog(items.map(\.item)) }
                     .disabled(items.isEmpty || (flagged && !confirmedImplausible))
             }
         }
         .scrollContentBackground(.hidden)
         .background(StrandPalette.surfaceBase)
+        .sheet(isPresented: $addingMissed) {
+            // Per-100 g entry plus an amount; becomes one more item in this meal.
+            FoodManualEntryView(mode: .per100g(grams: 100)) { name, per100g, grams in
+                items.append(Editable(item: .init(name: name, grams: grams ?? 100, per100g: per100g, confidence: .high)))
+                addingMissed = false
+            }
+        }
     }
 }
 #endif
 ```
 
-(If two items share a name, `id: \.name` collides; give `MealItem` an `id` by wrapping: `struct Editable: Identifiable { let id = UUID(); var item: FoodVisionReply.MealItem }` and iterate that instead. Do this from the start if Claude returns duplicate names in on-device testing.)
-
-- [ ] **Step 5: `FoodQuickAddView.swift`**
+- [ ] **Step 5: `FoodManualEntryView.swift`** (Quick add totals, and per-100 g entry for products and missed items)
 
 ```swift
 #if os(iOS)
@@ -1790,29 +1860,48 @@ import SwiftUI
 import StrandDesign
 import StrandNutrition
 
-struct FoodQuickAddView: View {
-    let onLog: (String, Macros) -> Void
+/// Hand entry in two modes: `.totals` (Quick add: the eaten amount's macros) and `.per100g`
+/// (a product or missed item: values per 100 g plus the amount eaten). Rejects negative values.
+struct FoodManualEntryView: View {
+    enum Mode { case totals, per100g(grams: Double) }
+
+    let mode: Mode
+    /// name, values (totals or per 100 g, per mode), grams (nil in `.totals`)
+    let onDone: (String, MacroPer100g, Double?) -> Void
+
     @State private var name = ""
     @State private var kcal: Double?
     @State private var protein: Double?
     @State private var carbs: Double?
     @State private var fat: Double?
+    @State private var grams: Double?
+
+    private var isPer100g: Bool { if case .per100g = mode { return true } else { return false } }
+    private var values: [Double?] { [kcal, protein, carbs, fat] }
+    private var valid: Bool {
+        values.contains { $0 != nil } && values.allSatisfy { ($0 ?? 0) >= 0 }
+            && (!isPer100g || (grams ?? 0) > 0)
+    }
 
     var body: some View {
         Form {
             TextField("Name", text: $name)
+            if isPer100g { Text("Values per 100 g").font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary) }
             field("Calories (kcal)", $kcal)
             field("Protein (g)", $protein)
             field("Carbs (g)", $carbs)
             field("Fat (g)", $fat)
-            NoopButton("Log", systemImage: "checkmark", kind: .primary) {
-                onLog(name.isEmpty ? String(localized: "Quick add") : name,
-                      Macros(kcal: kcal ?? 0, protein: protein ?? 0, carbs: carbs ?? 0, fat: fat ?? 0))
+            if isPer100g { field("Amount eaten (g)", $grams) }
+            NoopButton(isPer100g ? "Save" : "Log", systemImage: "checkmark", kind: .primary) {
+                onDone(name.isEmpty ? String(localized: "Quick add") : name,
+                       MacroPer100g(kcal: kcal ?? 0, protein: protein ?? 0, carbs: carbs ?? 0, fat: fat ?? 0),
+                       isPer100g ? grams : nil)
             }
-            .disabled(kcal == nil && protein == nil && carbs == nil && fat == nil)
+            .disabled(!valid)
         }
         .scrollContentBackground(.hidden)
         .background(StrandPalette.surfaceBase)
+        .onAppear { if case .per100g(let g) = mode, grams == nil { grams = g } }
     }
 
     private func field(_ label: LocalizedStringKey, _ v: Binding<Double?>) -> some View {
@@ -1832,6 +1921,7 @@ struct FoodQuickAddView: View {
 ```swift
 #if os(iOS)
 import SwiftUI
+import PhotosUI
 import StrandDesign
 import StrandNutrition
 import WhoopStore
@@ -1842,40 +1932,66 @@ struct FoodAddSheet: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage("food.photoNoticeShown") private var photoNoticeShown = false
 
+    /// What a photo is for: a meal estimate, or reading the nutrition table of a scanned barcode.
+    private enum PhotoPurpose: Equatable { case meal, label(barcode: String) }
+
     private enum Step: Identifiable {
-        case camera(forLabel: String?)          // nil: meal photo; barcode: label photo for that code
+        case camera(PhotoPurpose)
+        case library(PhotoPurpose)
         case scanner
         case working(String)
         case confirm([FoodVisionReply.MealItem])
         case portion(FoodProductRow, lastGrams: Double?)
         case notFound(barcode: String, reason: String)
+        case manualProduct(barcode: String)
         case quickAdd
         case recentPortion(FoodEntryRow)
-        var id: String { String(describing: self).prefix(40).description }
+
+        var id: String {
+            switch self {
+            case .camera: return "camera"
+            case .library: return "library"
+            case .scanner: return "scanner"
+            case .working(let t): return "working-\(t)"
+            case .confirm: return "confirm"
+            case .portion(let p, _): return "portion-\(p.id)"
+            case .notFound(let c, _): return "notFound-\(c)"
+            case .manualProduct(let c): return "manual-\(c)"
+            case .quickAdd: return "quickAdd"
+            case .recentPortion(let r): return "recent-\(r.id)"
+            }
+        }
     }
 
     @State private var step: Step?
+    @State private var pendingPhoto: (PhotoPurpose, fromLibrary: Bool)?
     @State private var showPhotoNotice = false
+    @State private var libraryItem: PhotosPickerItem?
     @State private var message: String?
 
     var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 16) {
                 HStack(spacing: 12) {
-                    NoopButton("Photo", systemImage: "camera.fill", kind: .primary) { startPhoto() }
+                    NoopButton("Photo", systemImage: "camera.fill", kind: .primary) { requestPhoto(.meal, fromLibrary: false) }
                     NoopButton("Barcode", systemImage: "barcode.viewfinder", kind: .primary) {
-                        step = BarcodeScannerView.isSupported ? .scanner : nil
-                        if !BarcodeScannerView.isSupported { message = String(localized: "Barcode scanning is not available on this device.") }
+                        if BarcodeScannerView.isSupported { step = .scanner }
+                        else { message = String(localized: "Barcode scanning is not available on this device.") }
                     }
                 }
-                NoopButton("Quick add", systemImage: "plus", kind: .secondary) { step = .quickAdd }
+                HStack(spacing: 12) {
+                    NoopButton("From library", systemImage: "photo.on.rectangle", kind: .secondary) {
+                        requestPhoto(.meal, fromLibrary: true)
+                    }
+                    NoopButton("Quick add", systemImage: "plus", kind: .secondary) { step = .quickAdd }
+                }
                 if let message {
                     Text(message).font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
                 }
                 Text("Recent").font(StrandFont.overline).foregroundStyle(StrandPalette.textTertiary)
                 List(model.recent) { r in
                     Button {
-                        Task { await model.relog(r); dismiss() }
+                        Task { if await model.relog(r) { dismiss() } else { message = model.errorMessage } }
                     } label: {
                         HStack {
                             Text(r.name).foregroundStyle(StrandPalette.textPrimary)
@@ -1894,28 +2010,49 @@ struct FoodAddSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } } }
             .alert("Photos are sent to Anthropic", isPresented: $showPhotoNotice) {
-                Button("Continue") { photoNoticeShown = true; step = .camera(forLabel: nil) }
-                Button("Cancel", role: .cancel) {}
+                Button("Continue") {
+                    photoNoticeShown = true
+                    if let (purpose, lib) = pendingPhoto { openPhoto(purpose, fromLibrary: lib) }
+                }
+                Button("Cancel", role: .cancel) { pendingPhoto = nil }
             } message: {
-                Text("To recognise food, NOOP sends the photo once to Anthropic with your own API key. The photo is not stored.")
+                Text("To recognise food or read a label, NOOP sends the photo once to Anthropic with your own API key. The photo is not stored.")
             }
             .sheet(item: $step) { s in sheet(for: s) }
         }
     }
 
-    private func startPhoto() {
-        do { _ = try FoodVisionService.credentials() } catch { message = error.localizedDescription; return }
-        if photoNoticeShown { step = .camera(forLabel: nil) } else { showPhotoNotice = true }
+    /// The single gate for EVERY photo (meal or label, camera or library): credentials, then the
+    /// one-time notice, then the picker.
+    private func requestPhoto(_ purpose: PhotoPurpose, fromLibrary: Bool) {
+        do { _ = try FoodVisionService.credentials() } catch { message = error.localizedDescription; step = nil; return }
+        if photoNoticeShown { openPhoto(purpose, fromLibrary: fromLibrary) }
+        else { step = nil; pendingPhoto = (purpose, fromLibrary); showPhotoNotice = true }
+    }
+
+    private func openPhoto(_ purpose: PhotoPurpose, fromLibrary: Bool) {
+        pendingPhoto = nil
+        step = fromLibrary ? .library(purpose) : .camera(purpose)
     }
 
     @ViewBuilder private func sheet(for s: Step) -> some View {
         switch s {
-        case .camera(let barcode):
+        case .camera(let purpose):
             CameraPicker { data in
                 guard let data else { step = nil; return }
-                step = .working(String(localized: "Reading photo..."))
-                Task { await handlePhoto(data, labelFor: barcode) }
+                process(data, purpose)
             }
+        case .library(let purpose):
+            PhotosPicker("Choose a photo", selection: $libraryItem, matching: .images)
+                .padding(16)
+                .onChange(of: libraryItem) { _, item in
+                    guard let item else { return }
+                    Task {
+                        libraryItem = nil
+                        if let data = try? await item.loadTransferable(type: Data.self) { process(data, purpose) }
+                        else { message = String(localized: "Couldn't open that photo."); step = nil }
+                    }
+                }
         case .scanner:
             BarcodeScannerView { code in
                 step = .working(String(localized: "Looking up product..."))
@@ -1927,49 +2064,80 @@ struct FoodAddSheet: View {
         case .confirm(let items):
             FoodPhotoConfirmView(items: items) { final in
                 Task {
-                    for i in final {
-                        await model.log(name: i.name, grams: i.grams, per100g: i.per100g, source: "photo", productId: nil)
-                    }
-                    step = nil; dismiss()
+                    let ok = await model.log(final.map {
+                        .init(name: $0.name, grams: $0.grams, per100g: $0.per100g, source: "photo", productId: nil)
+                    })
+                    finish(ok)
                 }
             }
         case .portion(let p, let last):
             FoodPortionView(name: p.name, per100g: p.per100g, servingGrams: p.servingGrams, lastGrams: last) { g in
                 Task {
-                    await model.log(name: p.name, grams: g, per100g: p.per100g,
-                                    source: p.origin == "label" ? "label" : "barcode", productId: p.id)
-                    step = nil; dismiss()
+                    let source = p.origin == "label" ? "label" : (p.origin == "manual" ? "quick" : "barcode")
+                    finish(await model.log([.init(name: p.name, grams: g, per100g: p.per100g, source: source, productId: p.id)]))
                 }
             }
         case .notFound(let code, let reason):
             VStack(alignment: .leading, spacing: 16) {
                 Text(reason).font(StrandFont.subhead).foregroundStyle(StrandPalette.textPrimary)
                 NoopButton("Photograph the nutrition table", systemImage: "camera.fill", kind: .primary) {
-                    do { _ = try FoodVisionService.credentials(); step = .camera(forLabel: code) }
-                    catch { message = error.localizedDescription; step = nil }
+                    requestPhoto(.label(barcode: code), fromLibrary: false)
                 }
-                NoopButton("Enter manually", systemImage: "square.and.pencil", kind: .secondary) { step = .quickAdd }
+                NoopButton("Enter per 100 g by hand", systemImage: "square.and.pencil", kind: .secondary) {
+                    step = .manualProduct(barcode: code)
+                }
                 Spacer()
             }
             .padding(16).background(StrandPalette.surfaceBase)
+        case .manualProduct(let code):
+            FoodManualEntryView(mode: .per100g(grams: 100)) { name, per100g, grams in
+                Task {
+                    // Cache under the barcode so the next scan of this product works offline.
+                    let row = FoodProductRow(id: code, deviceId: FoodLog.deviceId, name: name, brand: nil,
+                                             kcal100: per100g.kcal, protein100: per100g.protein,
+                                             carbs100: per100g.carbs, fat100: per100g.fat, servingGrams: nil,
+                                             origin: "manual", updatedAt: Int(Date().timeIntervalSince1970))
+                    if let store = await model.store() { try? await store.upsertFoodProduct(row) }
+                    finish(await model.log([.init(name: name, grams: grams ?? 100, per100g: per100g,
+                                                  source: "quick", productId: code)]))
+                }
+            }
         case .quickAdd:
-            FoodQuickAddView { name, m in Task { await model.quickAdd(name: name, macros: m); step = nil; dismiss() } }
+            FoodManualEntryView(mode: .totals) { name, v, _ in
+                Task { finish(await model.quickAdd(name: name, macros: Macros(kcal: v.kcal, protein: v.protein,
+                                                                              carbs: v.carbs, fat: v.fat))) }
+            }
         case .recentPortion(let r):
             if let g = r.grams, g > 0 {
                 let per100 = MacroPer100g(kcal: r.kcal / g * 100, protein: r.proteinG / g * 100,
                                           carbs: r.carbsG / g * 100, fat: r.fatG / g * 100)
                 FoodPortionView(name: r.name, per100g: per100, servingGrams: nil, lastGrams: g) { newG in
-                    Task { await model.relog(r, grams: newG); step = nil; dismiss() }
+                    Task { finish(await model.relog(r, grams: newG)) }
                 }
             } else {
-                FoodQuickAddView { name, m in Task { await model.quickAdd(name: name, macros: m); step = nil; dismiss() } }
+                FoodManualEntryView(mode: .totals) { name, v, _ in
+                    Task { finish(await model.quickAdd(name: name, macros: Macros(kcal: v.kcal, protein: v.protein,
+                                                                                  carbs: v.carbs, fat: v.fat))) }
+                }
             }
         }
     }
 
-    private func handlePhoto(_ data: Data, labelFor barcode: String?) async {
+    /// Dismiss only when the write succeeded; otherwise show why and stay open.
+    private func finish(_ ok: Bool) {
+        step = nil
+        if ok { dismiss() } else { message = model.errorMessage ?? String(localized: "Couldn't save. Try again.") }
+    }
+
+    private func process(_ data: Data, _ purpose: PhotoPurpose) {
+        step = .working(String(localized: "Reading photo..."))
+        Task { await handlePhoto(data, purpose) }
+    }
+
+    private func handlePhoto(_ data: Data, _ purpose: PhotoPurpose) async {
         do {
-            if let barcode {
+            switch purpose {
+            case .label(let barcode):
                 let l = try await FoodVisionService.readLabel(photo: data)
                 let row = FoodProductRow(id: barcode, deviceId: FoodLog.deviceId, name: l.name, brand: nil,
                                          kcal100: l.per100g.kcal, protein100: l.per100g.protein,
@@ -1978,7 +2146,7 @@ struct FoodAddSheet: View {
                                          updatedAt: Int(Date().timeIntervalSince1970))
                 if let store = await model.store() { try await store.upsertFoodProduct(row) }
                 step = .portion(row, lastGrams: nil)
-            } else {
+            case .meal:
                 step = .confirm(try await FoodVisionService.analyzeMeal(photo: data))
             }
         } catch FoodVisionReply.Failure.nothingRecognised {
@@ -2005,14 +2173,14 @@ struct FoodAddSheet: View {
                 step = .notFound(barcode: code, reason: String(localized: "New product. Online lookup is off (Settings > Food logging)."))
             }
         } catch {
-            step = .notFound(barcode: code, reason: String(localized: "Lookup failed (offline?)."))
+            step = .notFound(barcode: code, reason: String(localized: "Lookup failed. Check your connection."))
         }
     }
 }
 #endif
 ```
 
-`Step.id` uses a description prefix so `.sheet(item:)` re-presents when the step changes; if SwiftUI does not swap content reliably during testing, replace the derived id with an explicit `let id = UUID()` stored per case via a small wrapper struct.
+`Step.id` is distinct per step, so `.sheet(item:)` swaps content when the step changes. `PhotosPicker` needs no usage string (it runs out of process).
 
 - [ ] **Step 7: `FoodDayView.swift`** (the screen reached from More)
 
@@ -2220,6 +2388,126 @@ git commit -m "feat(food): More > Food entry and Food logging settings"
 
 ---
 
+### Task 14b: Show logged totals in Compare/Explore, and "Delete all food data"
+
+Independent plan review found that `MetricCatalog` declares the nutrition keys only under `nutrition-csv`
+(`Strand/Data/MetricCatalog.swift:186-189`) and Compare reads each descriptor's exact source, so totals under
+`noop-food` would be invisible. It also found that `deleteAllData(deviceId:)` is only ever called for a
+registered device or Apple Health, so adding the tables to `deviceScopedTables` alone never clears food data.
+
+**Files:**
+- Modify: `Strand/Data/MetricCatalog.swift` (`sourceLabel` switch ~line 22; nutrition block ~line 186)
+- Modify: `Strand/Screens/SettingsView.swift` (the `foodLoggingCard` from Task 14)
+- Test: `StrandTests/FoodCatalogTests.swift`
+
+- [ ] **Step 1: Write the failing test**
+
+```swift
+import XCTest
+@testable import Strand
+
+final class FoodCatalogTests: XCTestCase {
+    func testFoodLogTotalsAreInTheCatalog() {
+        for key in ["calories_in", "protein_g", "carbs_g", "fat_g"] {
+            let d = MetricCatalog.all.first { $0.key == key && $0.source == "noop-food" }
+            XCTAssertNotNil(d, "\(key) has no noop-food descriptor, so logged totals never reach Compare/Explore")
+            XCTAssertEqual(d?.sourceLabel, String(localized: "Food log"))
+        }
+    }
+
+    func testCatalogIdsStayUnique() {
+        let ids = MetricCatalog.all.map(\.id)
+        XCTAssertEqual(ids.count, Set(ids).count)
+    }
+}
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `xcodegen generate && xcodebuild -project Strand.xcodeproj -scheme Strand -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO test -only-testing:StrandTests/FoodCatalogTests 2>&1 | tail -5`
+Expected: FAIL in `testFoodLogTotalsAreInTheCatalog`.
+
+- [ ] **Step 3: Add the descriptors and the label**
+
+In `sourceLabel`, after `case "nutrition-csv": return String(localized: "Nutrition")`, add:
+
+```swift
+        case "noop-food":    return String(localized: "Food log")
+```
+
+After the `d("fat_g", ... "nutrition-csv" ...)` line, add (ids are `source:key`, so these sit beside the CSV ones the
+same way `noop-mood` metrics do):
+
+```swift
+        // ── Nutrition logged in-app (macro logger, metricSeries deviceId "noop-food")
+        d("calories_in", String(localized: "Calories In"), "Nutrition", "kcal", "noop-food", "fork.knife", 0, nil),
+        d("protein_g", String(localized: "Protein"), "Nutrition", "g", "noop-food", "p.circle", 0, nil),
+        d("carbs_g", String(localized: "Carbs"), "Nutrition", "g", "noop-food", "c.circle", 0, nil),
+        d("fat_g", String(localized: "Fat"), "Nutrition", "g", "noop-food", "f.circle", 0, nil),
+```
+
+Then check every place that resolves a metric by key alone (`grep -rn 'first(where: { $0.key ==' Strand StrandiOS`).
+Where a lookup by bare key could now return the `noop-food` descriptor instead of the CSV one, make sure that is
+acceptable (both carry the same title and unit); if a call site needs the CSV one specifically, add the `source`
+condition there.
+
+- [ ] **Step 4: "Delete all food data" in Settings**
+
+In `foodLoggingCard`, after the target fields, add a destructive button behind a confirmation. Use the same store
+access the rest of `SettingsView` uses (check for `@EnvironmentObject var repo: Repository` at the top of the file;
+add it if absent):
+
+```swift
+                Divider().overlay(StrandPalette.hairline)
+                Button(role: .destructive) { confirmFoodDelete = true } label: {
+                    Text("Delete all food data").font(StrandFont.subhead)
+                }
+                .confirmationDialog("Delete all logged food, saved products and food totals?",
+                                    isPresented: $confirmFoodDelete, titleVisibility: .visible) {
+                    Button("Delete", role: .destructive) {
+                        Task {
+                            guard let store = await repo.storeHandle() else { return }
+                            try? await store.deleteAllData(deviceId: FoodLog.deviceId)
+                        }
+                    }
+                }
+```
+
+with `@State private var confirmFoodDelete = false` beside the other state. `deleteAllData(deviceId:)` clears every
+table in `deviceScopedTables` for that id, which now includes `foodEntry`, `foodProduct` and the `noop-food`
+`metricSeries` rows. Add a store test in `FoodLogStoreTests`:
+
+```swift
+    func testDeleteAllDataClearsFood() async throws {
+        let store = try await WhoopStore.inMemory()
+        try await store.insertFoodEntries([entry("a")])
+        try await store.upsertFoodProduct(FoodProductRow(id: "1", deviceId: FoodLog.deviceId, name: "x", brand: nil,
+            kcal100: 1, protein100: 0, carbs100: 0, fat100: 0, servingGrams: nil, origin: "manual", updatedAt: 1))
+        try await store.deleteAllData(deviceId: FoodLog.deviceId)
+        XCTAssertTrue(try await store.foodEntries(deviceId: FoodLog.deviceId, day: "2026-10-20").isEmpty)
+        XCTAssertNil(try await store.foodProduct(id: "1"))
+        XCTAssertTrue(try await store.metricSeries(deviceId: FoodLog.deviceId, key: "calories_in",
+                                                   from: "2026-10-20", to: "2026-10-20").isEmpty)
+    }
+```
+
+(Check the actor-side name with `grep -n "func deleteAllData" Packages/WhoopStore/Sources/WhoopStore/*.swift`;
+`Strand/Data/DeviceRegistry.swift:96` calls `store.deleteAllData(deviceId:)`.)
+
+- [ ] **Step 5: Run tests and build**
+
+Run: `cd Packages/WhoopStore && swift test --filter FoodLogStoreTests && cd ../.. && xcodebuild -project Strand.xcodeproj -scheme Strand -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO test -only-testing:StrandTests/FoodCatalogTests 2>&1 | tail -3 && xcodebuild -project Strand.xcodeproj -scheme NOOPiOS -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO build -quiet`
+Expected: all pass, iOS build succeeds.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add Strand/Data/MetricCatalog.swift Strand/Screens/SettingsView.swift StrandTests/FoodCatalogTests.swift Packages/WhoopStore/Tests
+git commit -m "feat(food): logged totals in Compare/Explore; delete all food data"
+```
+
+---
+
 ### Task 15: Docs, translation and lint gates
 
 **Files:**
@@ -2308,7 +2596,8 @@ Expected: `App installed: bundleID: <BUNDLE_ID_PREFIX>.noop`. The camera permiss
 3. Barcode: scan a supermarket product found on OFF; Log 1 serving.
 4. Barcode: scan a product not on OFF (or turn lookup off and scan a new one); photograph its nutrition table; Log.
 5. Recent: tap the first food to log it again; long-press to change the amount.
-6. Compare: pick "Protein" and confirm today's value appears.
+6. Compare: pick "Protein" (Food log) and confirm today's value appears.
+7. Settings > Food logging > Delete all food data: the Food screen and Compare are empty afterwards.
 
 - [ ] **Step 5: Final commit if anything changed during verification**
 
