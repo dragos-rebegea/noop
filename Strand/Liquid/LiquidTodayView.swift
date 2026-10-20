@@ -1092,6 +1092,12 @@ struct LiquidTodayView: View {
                      frac: hydrationGoalML.map {
                          HydrationGoal.fraction(totalML: hydrationTotalML ?? 0, goalML: $0)
                      })
+        case .food:
+            #if os(iOS)
+            FoodTodayCard()
+            #else
+            EmptyView()
+            #endif
         case .coupled:
             // A tap-through to the full Coupled day screen. No value.
             cardLink(.coupled, title: card.title, sub: card.subtitle,

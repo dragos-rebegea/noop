@@ -29,6 +29,14 @@ public enum FoodVisionReply {
     food, return an empty items list.
     """
 
+    public static func describePrompt(_ description: String) -> String {
+        """
+        The user describes what they ate: "\(description)". List each distinct food or drink with an \
+        estimated eaten portion in grams and typical energy and macronutrients per 100 g. If the text \
+        describes no food, return an empty items list.
+        """
+    }
+
     public static let labelPrompt = """
     Read the nutrition facts table in this photo. Return the product name if visible (otherwise a short \
     description), energy in kcal and protein, carbohydrate and fat in grams, all per 100 g. If the table \

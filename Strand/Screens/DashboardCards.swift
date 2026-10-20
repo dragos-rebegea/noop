@@ -32,6 +32,7 @@ enum DashboardCard: String, CaseIterable, Identifiable {
     case sleep
     case calories
     case hydration
+    case food
     /// Optional, default-OFF (task #43): a tap-through to the Coupled view (the WHOOP-style day read). Unlike
     /// every other card this carries NO metric value of its own, it is a navigation row that opens the full
     /// CoupledView screen. It is NOT in `defaultSelection`, so a fresh install never shows it until the user
@@ -66,6 +67,7 @@ enum DashboardCard: String, CaseIterable, Identifiable {
         case .sleep:       return String(localized: "Sleep")
         case .calories:    return String(localized: "Calories")
         case .hydration:   return String(localized: "Hydration")
+        case .food:        return String(localized: "Today's foods")
         case .coupled:     return String(localized: "Coupled view")
         case .coach:       return String(localized: "Coach")
         }
@@ -89,6 +91,7 @@ enum DashboardCard: String, CaseIterable, Identifiable {
         case .sleep:       return String(localized: "Last night")
         case .calories:    return String(localized: "Active energy")
         case .hydration:   return String(localized: "Today's fluid")
+        case .food:        return String(localized: "Calories and macros")
         case .coupled:     return String(localized: "Recovery, strain and sleep in one glance")
         // Reuses the Coach screen's own subtitle, so the card and the screen describe the feature
         // identically and no new copy needs translating into ten locales.
@@ -112,6 +115,7 @@ enum DashboardCard: String, CaseIterable, Identifiable {
         case .sleep:       return "bed.double.fill"
         case .calories:    return "flame.fill"
         case .hydration:   return "waterbottle.fill"
+        case .food:        return "fork.knife"
         case .coupled:     return "circle.hexagongrid.fill"
         case .coach:       return "bubble.left.and.text.bubble.right.fill"
         }
@@ -133,6 +137,7 @@ enum DashboardCard: String, CaseIterable, Identifiable {
         case .sleep:       return ""    // value carries the h/m itself
         case .calories:    return "kcal"
         case .hydration:   return ""    // value bakes in "<total> / <goal> L" itself
+        case .food:        return ""
         case .coupled:     return ""    // a tap-through row, no value, so no unit
         case .coach:       return ""    // likewise: a launcher row, no metric of its own
         }

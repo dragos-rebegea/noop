@@ -34,6 +34,9 @@ enum TabRoute: Hashable {
     case sleep
     case health
     case hydration
+    #if os(iOS)
+    case food
+    #endif
     case coupled
 }
 
@@ -70,6 +73,9 @@ extension View {
             case .sleep: SleepView()
             case .health: HealthView()
             case .hydration: HydrationView()
+            #if os(iOS)
+            case .food: FoodDayView()
+            #endif
             case .coupled: CoupledView()
             }
         }

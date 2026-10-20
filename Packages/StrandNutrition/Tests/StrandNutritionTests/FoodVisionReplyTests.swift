@@ -49,4 +49,9 @@ final class FoodVisionReplyTests: XCTestCase {
         XCTAssertNoThrow(try JSONSerialization.jsonObject(with: Data(FoodVisionReply.mealSchemaJSON.utf8)))
         XCTAssertNoThrow(try JSONSerialization.jsonObject(with: Data(FoodVisionReply.labelSchemaJSON.utf8)))
     }
+
+    func testDescribePromptContainsDescriptionVerbatim() {
+        let description = "Two eggs, sourdough toast, and coffee with milk"
+        XCTAssertTrue(FoodVisionReply.describePrompt(description).contains(description))
+    }
 }

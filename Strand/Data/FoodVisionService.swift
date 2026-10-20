@@ -38,6 +38,14 @@ enum FoodVisionService {
         return try FoodVisionReply.decodeMeal(json)
     }
 
+    static func analyzeDescription(_ text: String) async throws -> [FoodVisionReply.MealItem] {
+        let (key, model) = try credentials()
+        let json = try await AnthropicVision.run(key: key, model: model,
+                                                 prompt: FoodVisionReply.describePrompt(text), jpeg: nil,
+                                                 schemaJSON: FoodVisionReply.mealSchemaJSON)
+        return try FoodVisionReply.decodeMeal(json)
+    }
+
     static func readLabel(photo: Data) async throws -> FoodVisionReply.Label {
         let (key, model) = try credentials()
         guard let jpeg = FoodImage.jpegForUpload(photo) else { throw FoodVisionReply.Failure.malformed }

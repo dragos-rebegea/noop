@@ -3,6 +3,11 @@ import Combine
 import StrandNutrition
 import WhoopStore
 
+extension Notification.Name {
+    /// Posted after any food-log write so the Today card refreshes without waiting for a data refresh.
+    static let foodLogDidChange = Notification.Name("noop.foodLogDidChange")
+}
+
 /// State for the Food screens: today's entries, totals, targets and recent foods.
 @MainActor
 final class FoodLogModel: ObservableObject {
@@ -84,6 +89,7 @@ final class FoodLogModel: ObservableObject {
         guard let store = await repo.storeHandle() else { return }
         do { _ = try await store.deleteFoodEntry(id: r.id) } catch { errorMessage = error.localizedDescription }
         await load()
+        NotificationCenter.default.post(name: .foodLogDidChange, object: nil)
     }
 
     func store() async -> WhoopStore? { await repo.storeHandle() }
@@ -98,6 +104,7 @@ final class FoodLogModel: ObservableObject {
             try await store.insertFoodEntries(rows)
             errorMessage = nil
             await load()
+            NotificationCenter.default.post(name: .foodLogDidChange, object: nil)
             return true
         } catch {
             errorMessage = error.localizedDescription

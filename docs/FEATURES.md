@@ -408,8 +408,9 @@ food against how you feel. Parsed locally; nothing is uploaded.
 Log calories, protein, carbs and fat against daily targets from **More > Food**. Add food by
 **Photo** (Claude estimates the items and portions with your own Anthropic key; you check them
 before saving), **Barcode** (on-device scan; optional Open Food Facts lookup, cached on the phone),
-**Recent** (one tap to log again) or **Quick add**. Daily totals feed the same nutrition metrics as
-the CSV import, so Compare and Explore chart them. Photos are never stored.
+**Describe** (type what you ate for a Claude estimate), **Recent** (one tap to log again) or
+**Quick add**. Daily totals feed the same nutrition metrics as the CSV import, so Compare and Explore
+chart them. Photos are never stored.
 
 ### WHOOP Strap (Live BLE)
 Shows whether the strap is bonded and streaming. Pairs directly over Bluetooth — no WHOOP app,

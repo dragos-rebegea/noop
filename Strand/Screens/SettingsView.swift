@@ -1416,6 +1416,7 @@ struct SettingsView: View {
                         Task {
                             guard let store = await model.repo.storeHandle() else { return }
                             try? await store.deleteAllData(deviceId: FoodLog.deviceId)
+                            NotificationCenter.default.post(name: .foodLogDidChange, object: nil)
                         }
                     }
                 }

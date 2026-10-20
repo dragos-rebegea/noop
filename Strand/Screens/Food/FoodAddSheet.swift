@@ -14,12 +14,19 @@ struct FoodAddSheet: View {
     /// What a photo is for: a meal estimate, or reading the nutrition table of a scanned barcode.
     private enum PhotoPurpose: Equatable { case meal, label(barcode: String) }
 
+    /// Every action that sends user-provided content to Anthropic passes through one gate.
+    private enum AnthropicAction {
+        case photo(PhotoPurpose, fromLibrary: Bool)
+        case description
+    }
+
     private enum Step: Identifiable {
         case camera(PhotoPurpose)
         case library(PhotoPurpose)
+        case describe
         case scanner
         case working(String)
-        case confirm([FoodVisionReply.MealItem])
+        case confirm([FoodVisionReply.MealItem], source: String)
         case portion(FoodProductRow, lastGrams: Double?)
         case notFound(barcode: String, reason: String)
         case manualProduct(barcode: String)
@@ -30,6 +37,7 @@ struct FoodAddSheet: View {
             switch self {
             case .camera: return "camera"
             case .library: return "library"
+            case .describe: return "describe"
             case .scanner: return "scanner"
             case .working(let t): return "working-\(t)"
             case .confirm: return "confirm"
@@ -43,9 +51,10 @@ struct FoodAddSheet: View {
     }
 
     @State private var step: Step?
-    @State private var pendingPhoto: (PhotoPurpose, fromLibrary: Bool)?
-    @State private var showPhotoNotice = false
+    @State private var pendingAnthropicAction: AnthropicAction?
+    @State private var showAnthropicNotice = false
     @State private var libraryItem: PhotosPickerItem?
+    @State private var mealDescription = ""
     @State private var message: String?
 
     var body: some View {
@@ -63,6 +72,9 @@ struct FoodAddSheet: View {
                         requestPhoto(.meal, fromLibrary: true)
                     }
                     NoopButton("Quick add", systemImage: "plus", kind: .secondary) { step = .quickAdd }
+                    NoopButton("Describe", systemImage: "text.bubble", kind: .secondary) {
+                        requestAnthropic(.description)
+                    }
                 }
                 if let message {
                     Text(message).font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
@@ -88,30 +100,39 @@ struct FoodAddSheet: View {
             .navigationTitle("Add food")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } } }
-            .alert("Photos are sent to Anthropic", isPresented: $showPhotoNotice) {
+            .alert("Sent to Anthropic", isPresented: $showAnthropicNotice) {
                 Button("Continue") {
                     photoNoticeShown = true
-                    if let (purpose, lib) = pendingPhoto { openPhoto(purpose, fromLibrary: lib) }
+                    if let action = pendingAnthropicAction { openAnthropic(action) }
                 }
-                Button("Cancel", role: .cancel) { pendingPhoto = nil }
+                Button("Cancel", role: .cancel) { pendingAnthropicAction = nil }
             } message: {
-                Text("To recognise food or read a label, NOOP sends the photo once to Anthropic with your own API key. The photo is not stored.")
+                Text("To recognise food, read a label, or estimate a typed meal description, NOOP sends the photo or description once to Anthropic with your own API key. Photos are not stored.")
             }
             .sheet(item: $step) { s in sheet(for: s) }
         }
     }
 
-    /// The single gate for EVERY photo (meal or label, camera or library): credentials, then the
-    /// one-time notice, then the picker.
+    /// The single gate for every photo or typed description: credentials, then the one-time notice.
     private func requestPhoto(_ purpose: PhotoPurpose, fromLibrary: Bool) {
-        do { _ = try FoodVisionService.credentials() } catch { message = error.localizedDescription; step = nil; return }
-        if photoNoticeShown { openPhoto(purpose, fromLibrary: fromLibrary) }
-        else { step = nil; pendingPhoto = (purpose, fromLibrary); showPhotoNotice = true }
+        requestAnthropic(.photo(purpose, fromLibrary: fromLibrary))
     }
 
-    private func openPhoto(_ purpose: PhotoPurpose, fromLibrary: Bool) {
-        pendingPhoto = nil
-        step = fromLibrary ? .library(purpose) : .camera(purpose)
+    private func requestAnthropic(_ action: AnthropicAction) {
+        do { _ = try FoodVisionService.credentials() } catch { message = error.localizedDescription; step = nil; return }
+        if photoNoticeShown { openAnthropic(action) }
+        else { step = nil; pendingAnthropicAction = action; showAnthropicNotice = true }
+    }
+
+    private func openAnthropic(_ action: AnthropicAction) {
+        pendingAnthropicAction = nil
+        switch action {
+        case .photo(let purpose, let fromLibrary):
+            step = fromLibrary ? .library(purpose) : .camera(purpose)
+        case .description:
+            mealDescription = ""
+            step = .describe
+        }
     }
 
     @ViewBuilder private func sheet(for s: Step) -> some View {
@@ -132,6 +153,24 @@ struct FoodAddSheet: View {
                         else { message = String(localized: "Couldn't open that photo."); step = nil }
                     }
                 }
+        case .describe:
+            VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                Text(String(localized: "Describe what you ate"))
+                    .font(StrandFont.headline)
+                    .foregroundStyle(StrandPalette.textPrimary)
+                TextField(String(localized: "Meal description"), text: $mealDescription, axis: .vertical)
+                    .lineLimit(3...8)
+                    .textFieldStyle(.roundedBorder)
+                NoopButton("Estimate", systemImage: "sparkles", kind: .primary, fullWidth: true) {
+                    let text = mealDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+                    step = .working(String(localized: "Estimating meal..."))
+                    Task { await handleDescription(text) }
+                }
+                .disabled(mealDescription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Spacer()
+            }
+            .padding(NoopMetrics.cardPadding)
+            .background(StrandPalette.surfaceBase)
         case .scanner:
             BarcodeScannerView { code in
                 step = .working(String(localized: "Looking up product..."))
@@ -140,11 +179,11 @@ struct FoodAddSheet: View {
         case .working(let text):
             VStack(spacing: 12) { ProgressView(); Text(text).font(StrandFont.subhead) }
                 .frame(maxWidth: .infinity, maxHeight: .infinity).background(StrandPalette.surfaceBase)
-        case .confirm(let items):
+        case .confirm(let items, let source):
             FoodPhotoConfirmView(items: items) { final in
                 Task {
                     let ok = await model.log(final.map {
-                        .init(name: $0.name, grams: $0.grams, per100g: $0.per100g, source: "photo", productId: nil)
+                        .init(name: $0.name, grams: $0.grams, per100g: $0.per100g, source: source, productId: nil)
                     })
                     finish(ok)
                 }
@@ -226,13 +265,25 @@ struct FoodAddSheet: View {
                 if let store = await model.store() { try await store.upsertFoodProduct(row) }
                 step = .portion(row, lastGrams: nil)
             case .meal:
-                step = .confirm(try await FoodVisionService.analyzeMeal(photo: data))
+                step = .confirm(try await FoodVisionService.analyzeMeal(photo: data), source: "photo")
             }
         } catch FoodVisionReply.Failure.nothingRecognised {
             message = String(localized: "No food recognised in this photo. Try again or use Quick add.")
             step = nil
         } catch {
             message = String(localized: "Couldn't read this photo: ") + error.localizedDescription
+            step = nil
+        }
+    }
+
+    private func handleDescription(_ text: String) async {
+        do {
+            step = .confirm(try await FoodVisionService.analyzeDescription(text), source: "describe")
+        } catch FoodVisionReply.Failure.nothingRecognised {
+            message = String(localized: "No food recognised in this description. Try again or use Quick add.")
+            step = nil
+        } catch {
+            message = String(localized: "Couldn't estimate this meal: ") + error.localizedDescription
             step = nil
         }
     }

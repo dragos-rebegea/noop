@@ -9,19 +9,23 @@ enum AnthropicVision {
         var errorDescription: String? { message }
     }
 
-    static func makeRequest(key: String, model: String, prompt: String, jpeg: Data,
+    static func makeRequest(key: String, model: String, prompt: String, jpeg: Data?,
                             schemaJSON: String) throws -> URLRequest {
         let schema = try JSONSerialization.jsonObject(with: Data(schemaJSON.utf8))
+        var content: [[String: Any]] = []
+        if let jpeg {
+            content.append([
+                "type": "image",
+                "source": ["type": "base64", "media_type": "image/jpeg", "data": jpeg.base64EncodedString()],
+            ])
+        }
+        content.append(["type": "text", "text": prompt])
         let body: [String: Any] = [
             "model": model,
             "max_tokens": 2048,
             "messages": [[
                 "role": "user",
-                "content": [
-                    ["type": "image",
-                     "source": ["type": "base64", "media_type": "image/jpeg", "data": jpeg.base64EncodedString()]],
-                    ["type": "text", "text": prompt],
-                ],
+                "content": content,
             ]],
             "output_config": ["format": ["type": "json_schema", "schema": schema]],
         ]
@@ -48,7 +52,7 @@ enum AnthropicVision {
         return Data(text.utf8)
     }
 
-    static func run(key: String, model: String, prompt: String, jpeg: Data, schemaJSON: String,
+    static func run(key: String, model: String, prompt: String, jpeg: Data?, schemaJSON: String,
                     session: URLSession = .shared) async throws -> Data {
         let req = try makeRequest(key: key, model: model, prompt: prompt, jpeg: jpeg, schemaJSON: schemaJSON)
         let (data, resp) = try await session.data(for: req)

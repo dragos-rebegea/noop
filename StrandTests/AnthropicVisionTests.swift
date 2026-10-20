@@ -21,6 +21,17 @@ final class AnthropicVisionTests: XCTestCase {
         XCTAssertNotNil(format["schema"] as? [String: Any])
     }
 
+    func testTextOnlyRequestHasNoImageBlock() throws {
+        let req = try AnthropicVision.makeRequest(key: "k", model: "claude-sonnet-5-5", prompt: "P",
+                                                  jpeg: nil, schemaJSON: #"{"type":"object"}"#)
+        let body = try JSONSerialization.jsonObject(with: req.httpBody!) as! [String: Any]
+        let content = ((body["messages"] as! [[String: Any]])[0]["content"]) as! [[String: Any]]
+        XCTAssertEqual(content.count, 1)
+        XCTAssertEqual(content[0]["type"] as? String, "text")
+        let format = (body["output_config"] as! [String: Any])["format"] as! [String: Any]
+        XCTAssertEqual(format["type"] as? String, "json_schema")
+    }
+
     func testExtractText() throws {
         let ok = Data(#"{"stop_reason":"end_turn","content":[{"type":"text","text":"{\"items\":[]}"}]}"#.utf8)
         XCTAssertEqual(try AnthropicVision.extractJSON(ok), Data(#"{"items":[]}"#.utf8))

@@ -73,7 +73,7 @@ extension DashboardCard {
         case .fitnessAge: return StrandPalette.chargeColor
         case .vo2max: return StrandPalette.chargeColor
         case .vitality, .hrv: return StrandPalette.metricPurple
-        case .restingHr: return StrandPalette.metricRose
+        case .restingHr, .food: return StrandPalette.metricRose
         case .steps, .stepsAverage30, .bloodOxygen, .hydration: return StrandPalette.metricCyan
         case .skinTemp, .calories: return StrandPalette.metricAmber
         case .sleep: return StrandPalette.restColor
