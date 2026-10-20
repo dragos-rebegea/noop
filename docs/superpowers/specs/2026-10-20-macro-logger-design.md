@@ -30,7 +30,7 @@ daily nutrition series the CSV import already feeds, so Compare, Explore and Coa
 | Store | `Packages/WhoopStore` | Migration `v48-food-log` creating `foodEntry` and `foodProduct`; CRUD; recompute of a day's totals into `metricSeries`. | GRDB, `StrandNutrition` |
 | Vision AI | `Strand/AI` | Image input + JSON-schema structured output on the Anthropic provider; a `FoodVisionService` with two calls: `analyzeMeal(image)` and `readNutritionLabel(image)`. | AI provider layer, `StrandNutrition` |
 | Product lookup | `Strand/Data/FoodProductLookup.swift` | Cache-first lookup; Open Food Facts fetch when enabled; writes results to `foodProduct`. | Store, `StrandNutrition`, URLSession |
-| UI | `Strand/Screens/Food/` | Food day view, add sheet, photo confirm screen, barcode scanner, portion screen, quick add, targets editor. iOS entry point in `RootTabView` (More menu route `.food`). | All of the above, `StrandDesign` tokens only |
+| UI | `Strand/Screens/Food/` | Food day view, add sheet, photo confirm screen, barcode scanner, portion screen, quick add, targets editor. iOS entry point in `RootTabView` (More > Body, route `.food`). Screens wrapped in `#if os(iOS)`. | All of the above, `StrandDesign` tokens only |
 
 `StrandNutrition` is a new package so the parsers and math are covered by `swift test` in
 `swift-packages.yml` with no app, no network and no strap.
@@ -42,8 +42,9 @@ daily nutrition series the CSV import already feeds, so Compare, Explore and Coa
 | Column | Type | Notes |
 |---|---|---|
 | `id` | TEXT PK | UUID string |
+| `deviceId` | TEXT | Fixed owner `noop-food` (repo rule: every table carries `deviceId` so delete-all clears it) |
 | `day` | TEXT | Local calendar day `yyyy-MM-dd` the entry was eaten (not the wake-day convention; food belongs to the day it was eaten) |
-| `loggedAt` | REAL | Epoch seconds |
+| `loggedAt` | INTEGER | Unix seconds |
 | `name` | TEXT | |
 | `grams` | REAL | Portion eaten; NULL for Quick add entries entered as totals |
 | `kcal`, `proteinG`, `carbsG`, `fatG` | REAL | Totals for this entry (already scaled) |
@@ -55,11 +56,12 @@ daily nutrition series the CSV import already feeds, so Compare, Explore and Coa
 | Column | Type | Notes |
 |---|---|---|
 | `id` | TEXT PK | Barcode for scanned products; `custom:<uuid>` otherwise |
+| `deviceId` | TEXT | Fixed owner `noop-food` |
 | `name`, `brand` | TEXT | brand nullable |
 | `kcal100`, `protein100`, `carbs100`, `fat100` | REAL | Per 100 g |
 | `servingGrams` | REAL NULL | Package serving size when known |
 | `origin` | TEXT | `off` (Open Food Facts) / `label` (Claude-read table) / `manual` |
-| `updatedAt` | REAL | Epoch seconds |
+| `updatedAt` | INTEGER | Unix seconds |
 
 Daily totals: after every insert, update or delete of a `foodEntry`, the store recomputes that day
 and upserts `metricSeries` rows under `deviceId = "noop-food"` with the existing keys `calories_in`,
