@@ -37,6 +37,10 @@ enum TodaySection: String, CaseIterable, Identifiable {
     /// selection in order; empty (and effectively invisible) until the user adds a card in Customise.
     /// Appended LAST so `decodeOrder`'s back-fill lands it predictably for existing saved orders.
     case addedCards
+    /// The macro logger's "Today's foods" card (calorie ring + macro dot grids), iOS only. Appended LAST
+    /// in the case list so existing raw ids keep their positions; `defaultOrder` places it right after
+    /// `hero`, and `decodeOrder` inserts it there for saved orders that predate it.
+    case food
 
     var id: String { rawValue }
 
@@ -54,13 +58,14 @@ enum TodaySection: String, CaseIterable, Identifiable {
         case .menstrualCycle: return String(localized: "Menstrual Cycle")
         case .journal:        return String(localized: "Journal")
         case .addedCards:     return String(localized: "Added Cards")
+        case .food:           return String(localized: "Today's foods")
         }
     }
 
     /// The original, hard-coded section order — the default when the layout isn't customised. The journal
     /// widget (#656) is last by default, where it was first added, above the data-sources card.
     static let defaultOrder: [TodaySection] = [
-        .hero, .liveSession, .synthesis, .keyMetrics, .workouts, .heartRate, .recoveryVitals, .yourCards,
+        .hero, .food, .liveSession, .synthesis, .keyMetrics, .workouts, .heartRate, .recoveryVitals, .yourCards,
         .menstrualCycle, .journal, .addedCards,
     ]
 }

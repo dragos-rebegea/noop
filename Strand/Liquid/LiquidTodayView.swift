@@ -387,6 +387,13 @@ struct LiquidTodayView: View {
                         // order they arranged. Empty (renders nothing) until they add one in Customise.
                         // Today-only, matching Android's addedCards section gate + the classic TodayView.
                         case .addedCards: if selectedDayOffset == 0 { hostedCardsSection }
+                        // Macro logger: today's calories and macros. Today only, iOS only (the Food screens are).
+                        case .food:
+                            #if os(iOS)
+                            if selectedDayOffset == 0 { FoodTodayCard() }
+                            #else
+                            EmptyView()
+                            #endif
                         }
                     }
                     // Opt-in "looks like a workout?" suggestion, dropped in the liquid Home rewrite. Its
@@ -1092,12 +1099,6 @@ struct LiquidTodayView: View {
                      frac: hydrationGoalML.map {
                          HydrationGoal.fraction(totalML: hydrationTotalML ?? 0, goalML: $0)
                      })
-        case .food:
-            #if os(iOS)
-            FoodTodayCard()
-            #else
-            EmptyView()
-            #endif
         case .coupled:
             // A tap-through to the full Coupled day screen. No value.
             cardLink(.coupled, title: card.title, sub: card.subtitle,

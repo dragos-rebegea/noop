@@ -15,6 +15,7 @@ extension TodaySection {
         case .menstrualCycle: return "drop.degreesign"
         case .journal: return "book.closed"
         case .addedCards: return "rectangle.stack.badge.plus"
+        case .food: return "fork.knife"
         }
     }
 
@@ -31,6 +32,7 @@ extension TodaySection {
         case .menstrualCycle: return StrandPalette.restColor
         case .journal: return StrandPalette.metricAmber
         case .addedCards: return StrandPalette.accent
+        case .food: return StrandPalette.metricRose
         }
     }
 }
@@ -73,7 +75,7 @@ extension DashboardCard {
         case .fitnessAge: return StrandPalette.chargeColor
         case .vo2max: return StrandPalette.chargeColor
         case .vitality, .hrv: return StrandPalette.metricPurple
-        case .restingHr, .food: return StrandPalette.metricRose
+        case .restingHr: return StrandPalette.metricRose
         case .steps, .stepsAverage30, .bloodOxygen, .hydration: return StrandPalette.metricCyan
         case .skinTemp, .calories: return StrandPalette.metricAmber
         case .sleep: return StrandPalette.restColor
