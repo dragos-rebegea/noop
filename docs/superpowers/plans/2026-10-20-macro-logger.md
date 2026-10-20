@@ -2893,3 +2893,65 @@ Entries log with `source: "describe"`.
 - [ ] **Step 5:** `docs/PRIVACY_SECURITY.md` AI Coach row: add "or a typed meal description" next to the meal photo text;
 `docs/FEATURES.md` Food section: add **Describe**.
 - [ ] **Step 6: Verify:** both app builds, `AnthropicVisionTests`, StrandNutrition tests.
+
+### Task 19: Premium add-food flow (camera-first)
+
+Research basis: Cal AI-style single camera with modes, MacroFactor's tap-count speed (one-tap re-log, voice/text
+describe), Bevel's editable review. Rules unchanged: design tokens only (`StrandPalette`, `StrandFont`,
+`NoopMetrics`, `StrandCard`, `NoopButton`; no hex colours, no `.system(size:)` fonts), nothing saved before an
+explicit Log, every photo/description through the existing credentials + one-time-notice gate, iOS only.
+`FoodLogModel`'s public API and the store are unchanged except where noted.
+
+**A. Pure helpers in StrandNutrition (TDD, `swift test`):**
+- `MealSlot` enum `breakfast, lunch, dinner, snack` with `static func slot(forHour:) -> MealSlot`:
+  5..<11 breakfast, 11..<16 lunch, 16..<22 dinner, otherwise snack. Tests at boundaries 4, 5, 10, 11, 15, 16, 21, 22.
+- `PortionStep.next(_ grams: Double, up: Bool) -> Double`: step 5 g below 50 g, 10 g below 200 g, 25 g from 200 g;
+  never below 5. `PortionStep.scaled(_ grams:, by factor:)` rounds to the nearest 5 g, minimum 5. Tests.
+- `TimeOfDaySuggestions.rank(_ entries: [(name: String, productId: String?, loggedAt: Date)], now: Date,
+  calendar: Calendar, limit: Int) -> [Int]` returns indices of entries ordered by: how many past logs of that food
+  fall within +/- 2 h of `now`'s hour (any day), then overall frequency, then recency; distinct foods only (same key as
+  `recentFoods`: lowercased name + productId). Tests with a morning-oats / evening-pasta fixture.
+
+**B. `FoodCaptureView` (new, replaces the old Photo/Barcode/Library/Describe/Quick add button grid as the root of
+`FoodAddSheet`).** Full-screen `DataScannerViewController` (one camera surface). Bottom: a segmented mode switcher
+`Meal · Barcode · Label` (swipe or tap; `.sensoryFeedback(.selection)`), a large circular shutter (hidden in Barcode
+mode, which recognises EAN/UPC live and proceeds on the first code with a success haptic), a Library button (bottom
+left, `PhotosPicker`), a Quick add button (bottom right). Top bar: close, torch toggle where available, and a Describe
+button. Above the controls: a horizontally scrolling row of suggestion chips (`TimeOfDaySuggestions` over the last
+30 days of entries, at most 8); tapping a chip re-logs it immediately via `model.relog` with a success haptic and a
+brief "Logged" toast, long-press opens the portion card. Shutter calls `capturePhoto()` on the scanner
+(Meal -> `analyzeMeal`, Label -> `readLabel` for the most recent scanned barcode if any, else ask to scan the
+barcode first). When the camera is unavailable (Simulator, permission denied) show a calm full-screen fallback with
+the same Library / Describe / Quick add actions and a "Allow camera in Settings" link. Remove `CameraPicker.swift`
+and `BarcodeScannerView.swift` if nothing else uses them.
+
+**C. Describe with voice.** Describe opens a sheet with a large multi-line field, a microphone button using the
+existing `CoachVoiceInput` (`StrandiOS/App/CoachVoiceInput.swift`: `requestAuthorization`, `startTranscribing`,
+`stopTranscribing`, `isRecording`, `canUseVoice`), live partial transcript into the field, example placeholder
+"2 eggs, toast with butter, flat white", and an "Estimate" primary button.
+
+**D. `FoodReviewView` (replaces `FoodPhotoConfirmView`).** Header: the captured photo as a rounded thumbnail (kept in
+memory only, never written) or a text bubble for Describe, plus the `MealSlot` title and time. A meal summary card:
+animated ring (kcal) and three thin P/C/F bars, and one line "Leaves 1,180 kcal and 92 g protein for today" (only when
+targets are set; computed from `model.totals` and targets; over target says "Puts you 120 kcal over today"). Item cards
+(one per item): name (editable on tap), confidence flag, a `-  150 g  +` stepper using `PortionStep.next`, chips
+`1/2`, `1x`, `2x` using `PortionStep.scaled`, and the item's kcal and protein. Swipe to delete an item. "+ Add item"
+opens `FoodManualEntryView(.per100g)`. While Claude works, show the same layout with shimmering placeholder cards
+(`.redacted(reason: .placeholder)` + a subtle opacity animation) instead of a spinner. Primary "Log meal" button;
+on success a short checkmark animation + `.sensoryFeedback(.success)`, then dismiss. Keep the implausible-values
+confirmation. Barcode/label products use a matching single-item `FoodPortionView` restyled the same way (product
+card, serving chips, stepper, "leaves you" line).
+
+**E. Food day view polish.** Group entries under `MealSlot` headers derived from `loggedAt` (no stored field),
+each header with that slot's kcal. Rows: name, grams, kcal, a thin protein/carb/fat composition bar. Swipe actions:
+Delete (destructive) and Log again. Haptic on delete. Keep the existing totals card but give it the same ring + bars
+as `FoodTodayCard` for visual consistency (reuse a shared `MacroRingView` / `MacroBarsView` extracted from
+`FoodTodayCard`, not a copy).
+
+**F. Strings:** every new user-visible string in the Food files uses `String(localized:)` or a SwiftUI literal.
+No string literals added to `TodayView.swift`, `LiquidTodayView.swift` or the other home files.
+
+**Verify:** `swift test` (StrandNutrition); macOS + iOS builds; `xcodebuild test` for `AnthropicVisionTests`,
+`FoodCatalogTests`, `AICoachFoodContextTests`, `TodayLayoutPrefsTests`; `cd Tools && python3 -m unittest test_home_i18n`;
+`python3 Tools/doc_comment_lint.py`; no em/en dashes in added lines. Then a Simulator walkthrough of the fallback
+path (no camera) with screenshots, and an on-device install for the camera paths.
