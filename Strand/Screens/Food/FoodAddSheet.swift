@@ -1,11 +1,14 @@
 #if os(iOS)
 import SwiftUI
 import PhotosUI
+import UIKit
 import StrandDesign
 import StrandNutrition
 import WhoopStore
 
-/// Photo / Barcode / Recent / Quick add, and the flows behind them.
+/// The add-food flow: a camera-first root (`FoodCaptureView`) and the sheets behind it.
+/// Nothing is saved before an explicit Log, and every photo or description bound for Anthropic
+/// passes one gate: credentials, then the one-time notice.
 struct FoodAddSheet: View {
     @ObservedObject var model: FoodLogModel
     @Environment(\.dismiss) private var dismiss
@@ -16,17 +19,15 @@ struct FoodAddSheet: View {
 
     /// Every action that sends user-provided content to Anthropic passes through one gate.
     private enum AnthropicAction {
-        case photo(PhotoPurpose, fromLibrary: Bool)
+        case capture(PhotoPurpose)
+        case library(PhotoPurpose)
         case description
     }
 
     private enum Step: Identifiable {
-        case camera(PhotoPurpose)
-        case library(PhotoPurpose)
         case describe
-        case scanner
+        case review
         case working(String)
-        case confirm([FoodVisionReply.MealItem], source: String)
         case portion(FoodProductRow, lastGrams: Double?)
         case notFound(barcode: String, reason: String)
         case manualProduct(barcode: String)
@@ -35,12 +36,9 @@ struct FoodAddSheet: View {
 
         var id: String {
             switch self {
-            case .camera: return "camera"
-            case .library: return "library"
             case .describe: return "describe"
-            case .scanner: return "scanner"
+            case .review: return "review"
             case .working(let t): return "working-\(t)"
-            case .confirm: return "confirm"
             case .portion(let p, _): return "portion-\(p.id)"
             case .notFound(let c, _): return "notFound-\(c)"
             case .manualProduct(let c): return "manual-\(c)"
@@ -50,261 +48,435 @@ struct FoodAddSheet: View {
         }
     }
 
+    @StateObject private var scanner = FoodScannerController()
+    @State private var mode: FoodCaptureMode = .meal
+    @State private var labelBarcode: String?
     @State private var step: Step?
     @State private var pendingAnthropicAction: AnthropicAction?
     @State private var showAnthropicNotice = false
+    @State private var showLibrary = false
     @State private var libraryItem: PhotosPickerItem?
-    @State private var mealDescription = ""
-    @State private var message: String?
+    @State private var libraryPurpose: PhotoPurpose = .meal
+    @State private var suggestions: [FoodEntryRow] = []
+    @State private var toast: String?
+    @State private var toastToken = UUID()
+    @State private var successTick = 0
+    @State private var warningTick = 0
+    /// Identifies the in-flight Claude or lookup request; a result for an older one is dropped.
+    @State private var requestToken = UUID()
+
+    // Review state: the header and Claude's items (nil while working).
+    @State private var reviewHeader: FoodReviewView.Header = .text("")
+    @State private var reviewItems: [FoodVisionReply.MealItem]?
+    @State private var reviewSource = "photo"
+    @State private var reviewAt = Date()
 
     var body: some View {
-        NavigationStack {
-            VStack(alignment: .leading, spacing: 16) {
-                HStack(spacing: 12) {
-                    NoopButton("Photo", systemImage: "camera.fill", kind: .primary) { requestPhoto(.meal, fromLibrary: false) }
-                    NoopButton("Barcode", systemImage: "barcode.viewfinder", kind: .primary) {
-                        if BarcodeScannerView.isSupported { step = .scanner }
-                        else { message = String(localized: "Barcode scanning is not available on this device.") }
-                    }
-                }
-                HStack(spacing: 12) {
-                    NoopButton("From library", systemImage: "photo.on.rectangle", kind: .secondary) {
-                        requestPhoto(.meal, fromLibrary: true)
-                    }
-                    NoopButton("Quick add", systemImage: "plus", kind: .secondary) { step = .quickAdd }
-                    NoopButton("Describe", systemImage: "text.bubble", kind: .secondary) {
-                        requestAnthropic(.description)
-                    }
-                }
-                if let message {
-                    Text(message).font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
-                }
-                Text("Recent").font(StrandFont.overline).foregroundStyle(StrandPalette.textTertiary)
-                List(model.recent) { r in
-                    Button {
-                        Task { if await model.relog(r) { dismiss() } else { message = model.errorMessage } }
-                    } label: {
-                        HStack {
-                            Text(r.name).foregroundStyle(StrandPalette.textPrimary)
-                            Spacer()
-                            Text(r.grams.map { String(format: "%.0f g", $0) } ?? "")
-                                .font(StrandFont.captionNumber).foregroundStyle(StrandPalette.textSecondary)
-                        }
-                    }
-                    .contextMenu { Button("Change amount") { step = .recentPortion(r) } }
-                }
-                .listStyle(.plain)
+        FoodCaptureView(
+            mode: $mode, scanner: scanner, labelBarcode: labelBarcode, suggestions: suggestions, toast: toast,
+            onClose: { dismiss() },
+            onShutter: shutter,
+            onLibrary: { requestAnthropic(.library(libraryPurposeForMode)) },
+            onDescribe: { requestAnthropic(.description) },
+            onQuickAdd: { step = .quickAdd },
+            onRelog: relog,
+            onAdjust: { step = .recentPortion($0) })
+        .sensoryFeedback(.success, trigger: successTick)
+        .sensoryFeedback(.warning, trigger: warningTick)
+        .alert("Sent to Anthropic", isPresented: $showAnthropicNotice) {
+            Button("Continue") {
+                photoNoticeShown = true
+                if let action = pendingAnthropicAction { openAnthropic(action) }
             }
-            .padding(16)
-            .background(StrandPalette.surfaceBase)
-            .navigationTitle("Add food")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } } }
-            .alert("Sent to Anthropic", isPresented: $showAnthropicNotice) {
-                Button("Continue") {
-                    photoNoticeShown = true
-                    if let action = pendingAnthropicAction { openAnthropic(action) }
-                }
-                Button("Cancel", role: .cancel) { pendingAnthropicAction = nil }
-            } message: {
-                Text("To recognise food, read a label, or estimate a typed meal description, NOOP sends the photo or description once to Anthropic with your own API key. Photos are not stored.")
+            Button("Cancel", role: .cancel) { pendingAnthropicAction = nil }
+        } message: {
+            Text("To recognise food, read a label, or estimate a typed meal description, NOOP sends the photo or description once to Anthropic with your own API key. Photos are not stored.")
+        }
+        .photosPicker(isPresented: $showLibrary, selection: $libraryItem, matching: .images)
+        .onChange(of: libraryItem) { _, item in
+            guard let item else { return }
+            libraryItem = nil
+            let purpose = libraryPurpose
+            Task {
+                if let data = try? await item.loadTransferable(type: Data.self) { process(data, purpose) }
+                else { show(String(localized: "Couldn't open that photo."), warning: true) }
             }
-            .sheet(item: $step) { s in sheet(for: s) }
+        }
+        .sheet(item: $step) { s in sheet(for: s) }
+        .onAppear { scanner.onBarcode = handleScanned }
+        .task { await loadSuggestions() }
+    }
+
+    private var libraryPurposeForMode: PhotoPurpose {
+        if mode == .label, let code = labelBarcode { return .label(barcode: code) }
+        return .meal
+    }
+
+    // MARK: Gate
+
+    private func requestAnthropic(_ action: AnthropicAction) {
+        do { _ = try FoodVisionService.credentials() } catch {
+            step = nil
+            show(error.localizedDescription, warning: true)
+            return
+        }
+        if photoNoticeShown { openAnthropic(action) }
+        else {
+            pendingAnthropicAction = action
+            afterSheetCloses { showAnthropicNotice = true }
         }
     }
 
-    /// The single gate for every photo or typed description: credentials, then the one-time notice.
-    private func requestPhoto(_ purpose: PhotoPurpose, fromLibrary: Bool) {
-        requestAnthropic(.photo(purpose, fromLibrary: fromLibrary))
-    }
-
-    private func requestAnthropic(_ action: AnthropicAction) {
-        do { _ = try FoodVisionService.credentials() } catch { message = error.localizedDescription; step = nil; return }
-        if photoNoticeShown { openAnthropic(action) }
-        else { step = nil; pendingAnthropicAction = action; showAnthropicNotice = true }
+    /// Closes any open sheet first: an alert or picker asked for while a sheet is still up never shows.
+    private func afterSheetCloses(_ action: @escaping () -> Void) {
+        guard step != nil else { action(); return }
+        step = nil
+        Task {
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            action()
+        }
     }
 
     private func openAnthropic(_ action: AnthropicAction) {
         pendingAnthropicAction = nil
         switch action {
-        case .photo(let purpose, let fromLibrary):
-            step = fromLibrary ? .library(purpose) : .camera(purpose)
+        case .capture(let purpose):
+            Task {
+                guard let data = await scanner.capture() else {
+                    show(String(localized: "Couldn't take the photo. Try again."), warning: true)
+                    return
+                }
+                process(data, purpose)
+            }
+        case .library(let purpose):
+            libraryPurpose = purpose
+            afterSheetCloses { showLibrary = true }
         case .description:
-            mealDescription = ""
             step = .describe
         }
     }
 
-    @ViewBuilder private func sheet(for s: Step) -> some View {
-        switch s {
-        case .camera(let purpose):
-            CameraPicker { data in
-                guard let data else { step = nil; return }
-                process(data, purpose)
+    // MARK: Capture actions
+
+    private func shutter() {
+        switch mode {
+        case .meal:
+            requestAnthropic(.capture(.meal))
+        case .label:
+            if let code = labelBarcode { requestAnthropic(.capture(.label(barcode: code))) }
+            else { show(String(localized: "Scan the product's barcode first, then photograph its nutrition table."), warning: true) }
+        case .barcode:
+            break
+        }
+    }
+
+    /// Live barcodes: Barcode mode looks the product up at once; Label mode remembers the code
+    /// the nutrition-table photo will be filed under. Ignored while a sheet is open.
+    private func handleScanned(_ code: String) {
+        guard step == nil, !showAnthropicNotice else { return }
+        switch mode {
+        case .barcode:
+            successTick += 1
+            let token = UUID()
+            requestToken = token
+            step = .working(String(localized: "Looking up product..."))
+            Task { await handleBarcode(code, token: token) }
+        case .label:
+            if labelBarcode != code {
+                labelBarcode = code
+                successTick += 1
             }
-        case .library(let purpose):
-            PhotosPicker("Choose a photo", selection: $libraryItem, matching: .images)
-                .padding(16)
-                .onChange(of: libraryItem) { _, item in
-                    guard let item else { return }
-                    Task {
-                        libraryItem = nil
-                        if let data = try? await item.loadTransferable(type: Data.self) { process(data, purpose) }
-                        else { message = String(localized: "Couldn't open that photo."); step = nil }
-                    }
-                }
-        case .describe:
-            VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
-                Text(String(localized: "Describe what you ate"))
-                    .font(StrandFont.headline)
-                    .foregroundStyle(StrandPalette.textPrimary)
-                TextField(String(localized: "Meal description"), text: $mealDescription, axis: .vertical)
-                    .lineLimit(3...8)
-                    .textFieldStyle(.roundedBorder)
-                NoopButton("Estimate", systemImage: "sparkles", kind: .primary, fullWidth: true) {
-                    let text = mealDescription.trimmingCharacters(in: .whitespacesAndNewlines)
-                    step = .working(String(localized: "Estimating meal..."))
-                    Task { await handleDescription(text) }
-                }
-                .disabled(mealDescription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                Spacer()
-            }
-            .padding(NoopMetrics.cardPadding)
-            .background(StrandPalette.surfaceBase)
-        case .scanner:
-            BarcodeScannerView { code in
-                step = .working(String(localized: "Looking up product..."))
-                Task { await handleBarcode(code) }
-            }
-        case .working(let text):
-            VStack(spacing: 12) { ProgressView(); Text(text).font(StrandFont.subhead) }
-                .frame(maxWidth: .infinity, maxHeight: .infinity).background(StrandPalette.surfaceBase)
-        case .confirm(let items, let source):
-            FoodPhotoConfirmView(items: items) { final in
-                Task {
-                    let ok = await model.log(final.map {
-                        .init(name: $0.name, grams: $0.grams, per100g: $0.per100g, source: source, productId: nil)
-                    })
-                    finish(ok)
-                }
-            }
-        case .portion(let p, let last):
-            FoodPortionView(name: p.name, per100g: p.per100g, servingGrams: p.servingGrams, lastGrams: last) { g in
-                Task {
-                    let source = p.origin == "label" ? "label" : (p.origin == "manual" ? "quick" : "barcode")
-                    finish(await model.log([.init(name: p.name, grams: g, per100g: p.per100g, source: source, productId: p.id)]))
-                }
-            }
-        case .notFound(let code, let reason):
-            VStack(alignment: .leading, spacing: 16) {
-                Text(reason).font(StrandFont.subhead).foregroundStyle(StrandPalette.textPrimary)
-                NoopButton("Photograph the nutrition table", systemImage: "camera.fill", kind: .primary) {
-                    requestPhoto(.label(barcode: code), fromLibrary: false)
-                }
-                NoopButton("Enter per 100 g by hand", systemImage: "square.and.pencil", kind: .secondary) {
-                    step = .manualProduct(barcode: code)
-                }
-                Spacer()
-            }
-            .padding(16).background(StrandPalette.surfaceBase)
-        case .manualProduct(let code):
-            FoodManualEntryView(mode: .per100g(grams: 100)) { name, per100g, grams in
-                Task {
-                    // Cache under the barcode so the next scan of this product works offline.
-                    let row = FoodProductRow(id: code, deviceId: FoodLog.deviceId, name: name, brand: nil,
-                                             kcal100: per100g.kcal, protein100: per100g.protein,
-                                             carbs100: per100g.carbs, fat100: per100g.fat, servingGrams: nil,
-                                             origin: "manual", updatedAt: Int(Date().timeIntervalSince1970))
-                    if let store = await model.store() { try? await store.upsertFoodProduct(row) }
-                    finish(await model.log([.init(name: name, grams: grams ?? 100, per100g: per100g,
-                                                  source: "quick", productId: code)]))
-                }
-            }
-        case .quickAdd:
-            FoodManualEntryView(mode: .totals) { name, v, _ in
-                Task { finish(await model.quickAdd(name: name, macros: Macros(kcal: v.kcal, protein: v.protein,
-                                                                              carbs: v.carbs, fat: v.fat))) }
-            }
-        case .recentPortion(let r):
-            if let g = r.grams, g > 0 {
-                let per100 = MacroPer100g(kcal: r.kcal / g * 100, protein: r.proteinG / g * 100,
-                                          carbs: r.carbsG / g * 100, fat: r.fatG / g * 100)
-                FoodPortionView(name: r.name, per100g: per100, servingGrams: nil, lastGrams: g) { newG in
-                    Task { finish(await model.relog(r, grams: newG)) }
-                }
+        case .meal:
+            break
+        }
+    }
+
+    private func relog(_ r: FoodEntryRow) {
+        Task {
+            if await model.relog(r) {
+                successTick += 1
+                show(String(localized: "Logged \(r.name)"))
+                await loadSuggestions()
             } else {
-                FoodManualEntryView(mode: .totals) { name, v, _ in
-                    Task { finish(await model.quickAdd(name: name, macros: Macros(kcal: v.kcal, protein: v.protein,
-                                                                                  carbs: v.carbs, fat: v.fat))) }
-                }
+                show(model.errorMessage ?? String(localized: "Couldn't save. Try again."), warning: true)
             }
         }
     }
+
+    // MARK: Sheets
+
+    @ViewBuilder private func sheet(for s: Step) -> some View {
+        switch s {
+        case .describe:
+            FoodDescribeView { text in
+                startReview(header: .text(text), source: "describe")
+                let token = requestToken
+                Task { await handleDescription(text, token: token) }
+            }
+        case .review:
+            NavigationStack {
+                FoodReviewView(
+                    header: reviewHeader, loggedAt: reviewAt, items: reviewItems,
+                    today: model.totals, targets: model.targets, errorMessage: model.errorMessage,
+                    log: { items in
+                        await model.log(items.map {
+                            .init(name: $0.name, grams: $0.grams, per100g: $0.per100g, source: reviewSource, productId: nil)
+                        })
+                    },
+                    onFinished: { step = nil; dismiss() })
+                .navigationTitle(String(localized: "Review"))
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar { cancelItem }
+            }
+            .interactiveDismissDisabled(reviewItems != nil)
+        case .working(let text):
+            NavigationStack {
+                FoodWorkingView(text: text)
+                    .toolbar { cancelItem }
+            }
+        case .portion(let p, let last):
+            NavigationStack {
+                FoodPortionView(name: p.name, per100g: p.per100g, servingGrams: p.servingGrams, lastGrams: last,
+                                today: model.totals, targets: model.targets) { g in
+                    Task {
+                        let source = p.origin == "label" ? "label" : (p.origin == "manual" ? "quick" : "barcode")
+                        finish(await model.log([.init(name: p.name, grams: g, per100g: p.per100g, source: source, productId: p.id)]))
+                    }
+                }
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar { cancelItem }
+            }
+        case .notFound(let code, let reason):
+            NavigationStack {
+                VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
+                    Text(reason).font(StrandFont.title2).foregroundStyle(StrandPalette.textPrimary)
+                    Text("Read the nutrition table instead, or type the values from the pack.")
+                        .font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
+                    NoopButton("Photograph the nutrition table", systemImage: "camera.fill", kind: .primary, fullWidth: true) {
+                        labelBarcode = code
+                        if scanner.availability == .ready {
+                            step = nil
+                            withAnimation(StrandMotion.interactive) { mode = .label }
+                        } else {
+                            requestAnthropic(.library(.label(barcode: code)))
+                        }
+                    }
+                    NoopButton("Enter per 100 g by hand", systemImage: "square.and.pencil", kind: .secondary, fullWidth: true) {
+                        step = .manualProduct(barcode: code)
+                    }
+                    Spacer()
+                }
+                .padding(NoopMetrics.screenPadding)
+                .background(StrandPalette.surfaceBase)
+                .toolbar { cancelItem }
+            }
+        case .manualProduct(let code):
+            NavigationStack {
+                FoodManualEntryView(mode: .per100g(grams: 100)) { name, per100g, grams in
+                    Task {
+                        // Cache under the barcode so the next scan of this product works offline.
+                        let row = FoodProductRow(id: code, deviceId: FoodLog.deviceId, name: name, brand: nil,
+                                                 kcal100: per100g.kcal, protein100: per100g.protein,
+                                                 carbs100: per100g.carbs, fat100: per100g.fat, servingGrams: nil,
+                                                 origin: "manual", updatedAt: Int(Date().timeIntervalSince1970))
+                        if let store = await model.store() { try? await store.upsertFoodProduct(row) }
+                        finish(await model.log([.init(name: name, grams: grams ?? 100, per100g: per100g,
+                                                      source: "quick", productId: code)]))
+                    }
+                }
+                .navigationTitle(String(localized: "Per 100 g"))
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar { cancelItem }
+            }
+        case .quickAdd:
+            NavigationStack {
+                quickAddForm
+                    .navigationTitle(String(localized: "Quick add"))
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar { cancelItem }
+            }
+        case .recentPortion(let r):
+            NavigationStack {
+                Group {
+                    if let g = r.grams, g > 0 {
+                        let per100 = MacroPer100g(kcal: r.kcal / g * 100, protein: r.proteinG / g * 100,
+                                                  carbs: r.carbsG / g * 100, fat: r.fatG / g * 100)
+                        FoodPortionView(name: r.name, per100g: per100, servingGrams: nil, lastGrams: g,
+                                        today: model.totals, targets: model.targets) { newG in
+                            Task { finish(await model.relog(r, grams: newG)) }
+                        }
+                    } else {
+                        quickAddForm
+                    }
+                }
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar { cancelItem }
+            }
+        }
+    }
+
+    private var quickAddForm: some View {
+        FoodManualEntryView(mode: .totals) { name, v, _ in
+            Task { finish(await model.quickAdd(name: name, macros: Macros(kcal: v.kcal, protein: v.protein,
+                                                                          carbs: v.carbs, fat: v.fat))) }
+        }
+    }
+
+    @ToolbarContentBuilder private var cancelItem: some ToolbarContent {
+        ToolbarItem(placement: .cancellationAction) {
+            Button(String(localized: "Cancel")) { requestToken = UUID(); step = nil }
+        }
+    }
+
+    // MARK: Results
 
     /// Dismiss only when the write succeeded; otherwise show why and stay open.
     private func finish(_ ok: Bool) {
         step = nil
-        if ok { dismiss() } else { message = model.errorMessage ?? String(localized: "Couldn't save. Try again.") }
+        if ok { successTick += 1; dismiss() }
+        else { show(model.errorMessage ?? String(localized: "Couldn't save. Try again."), warning: true) }
+    }
+
+    /// A short message over the camera that clears itself.
+    private func show(_ text: String, warning: Bool = false) {
+        if warning { warningTick += 1 }
+        let token = UUID()
+        toastToken = token
+        toast = text
+        Task {
+            try? await Task.sleep(nanoseconds: warning ? 3_500_000_000 : 1_600_000_000)
+            if toastToken == token { toast = nil }
+        }
+    }
+
+    private func startReview(header: FoodReviewView.Header, source: String) {
+        model.errorMessage = nil
+        reviewHeader = header
+        reviewItems = nil
+        reviewSource = source
+        reviewAt = Date()
+        requestToken = UUID()
+        step = .review
     }
 
     private func process(_ data: Data, _ purpose: PhotoPurpose) {
-        step = .working(String(localized: "Reading photo..."))
-        Task { await handlePhoto(data, purpose) }
-    }
-
-    private func handlePhoto(_ data: Data, _ purpose: PhotoPurpose) async {
-        do {
-            switch purpose {
-            case .label(let barcode):
-                let l = try await FoodVisionService.readLabel(photo: data)
-                let row = FoodProductRow(id: barcode, deviceId: FoodLog.deviceId, name: l.name, brand: nil,
-                                         kcal100: l.per100g.kcal, protein100: l.per100g.protein,
-                                         carbs100: l.per100g.carbs, fat100: l.per100g.fat,
-                                         servingGrams: l.servingGrams, origin: "label",
-                                         updatedAt: Int(Date().timeIntervalSince1970))
-                if let store = await model.store() { try await store.upsertFoodProduct(row) }
-                step = .portion(row, lastGrams: nil)
-            case .meal:
-                step = .confirm(try await FoodVisionService.analyzeMeal(photo: data), source: "photo")
-            }
-        } catch FoodVisionReply.Failure.nothingRecognised {
-            message = String(localized: "No food recognised in this photo. Try again or use Quick add.")
-            step = nil
-        } catch {
-            message = String(localized: "Couldn't read this photo: ") + error.localizedDescription
-            step = nil
+        switch purpose {
+        case .meal:
+            startReview(header: UIImage(data: data).map { .photo($0) } ?? .text(""), source: "photo")
+            let token = requestToken
+            Task { await handleMealPhoto(data, token: token) }
+        case .label(let barcode):
+            let token = UUID()
+            requestToken = token
+            step = .working(String(localized: "Reading the nutrition table..."))
+            Task { await handleLabel(data, barcode: barcode, token: token) }
         }
     }
 
-    private func handleDescription(_ text: String) async {
+    private func handleMealPhoto(_ data: Data, token: UUID) async {
         do {
-            step = .confirm(try await FoodVisionService.analyzeDescription(text), source: "describe")
+            let items = try await FoodVisionService.analyzeMeal(photo: data)
+            guard requestToken == token else { return }
+            reviewItems = items
         } catch FoodVisionReply.Failure.nothingRecognised {
-            message = String(localized: "No food recognised in this description. Try again or use Quick add.")
-            step = nil
+            fail(String(localized: "No food recognised in this photo. Try again or use Quick add."), token: token)
         } catch {
-            message = String(localized: "Couldn't estimate this meal: ") + error.localizedDescription
-            step = nil
+            fail(String(localized: "Couldn't read this photo: ") + error.localizedDescription, token: token)
         }
     }
 
-    private func handleBarcode(_ code: String) async {
-        guard let store = await model.store() else { step = nil; return }
+    private func handleLabel(_ data: Data, barcode: String, token: UUID) async {
+        do {
+            let l = try await FoodVisionService.readLabel(photo: data)
+            let row = FoodProductRow(id: barcode, deviceId: FoodLog.deviceId, name: l.name, brand: nil,
+                                     kcal100: l.per100g.kcal, protein100: l.per100g.protein,
+                                     carbs100: l.per100g.carbs, fat100: l.per100g.fat,
+                                     servingGrams: l.servingGrams, origin: "label",
+                                     updatedAt: Int(Date().timeIntervalSince1970))
+            if let store = await model.store() { try await store.upsertFoodProduct(row) }
+            guard requestToken == token else { return }
+            labelBarcode = nil
+            step = .portion(row, lastGrams: nil)
+        } catch FoodVisionReply.Failure.nothingRecognised {
+            fail(String(localized: "No nutrition table recognised. Try again closer and in good light."), token: token)
+        } catch {
+            fail(String(localized: "Couldn't read this photo: ") + error.localizedDescription, token: token)
+        }
+    }
+
+    private func handleDescription(_ text: String, token: UUID) async {
+        do {
+            let items = try await FoodVisionService.analyzeDescription(text)
+            guard requestToken == token else { return }
+            reviewItems = items
+        } catch FoodVisionReply.Failure.nothingRecognised {
+            fail(String(localized: "No food recognised in this description. Try again or use Quick add."), token: token)
+        } catch {
+            fail(String(localized: "Couldn't estimate this meal: ") + error.localizedDescription, token: token)
+        }
+    }
+
+    private func fail(_ text: String, token: UUID) {
+        guard requestToken == token else { return }
+        step = nil
+        show(text, warning: true)
+    }
+
+    private func handleBarcode(_ code: String, token: UUID) async {
+        guard let store = await model.store() else { fail(String(localized: "Couldn't open the food log."), token: token); return }
+        let next: Step
         do {
             switch try await FoodProductLookup.lookup(barcode: code, store: store) {
             case .product(let p):
-                let last = model.recent.first { $0.productId == p.id }?.grams
-                step = .portion(p, lastGrams: last)
+                next = .portion(p, lastGrams: model.recent.first { $0.productId == p.id }?.grams)
             case .incomplete(let name):
-                step = .notFound(barcode: code, reason: String(localized: "\(name) has no complete nutrition data."))
+                next = .notFound(barcode: code, reason: String(localized: "\(name) has no complete nutrition data."))
             case .notFound:
-                step = .notFound(barcode: code, reason: String(localized: "Product not found."))
+                next = .notFound(barcode: code, reason: String(localized: "Product not found."))
             case .lookupDisabled:
-                step = .notFound(barcode: code, reason: String(localized: "New product. Online lookup is off (Settings > Food logging)."))
+                next = .notFound(barcode: code, reason: String(localized: "New product. Online lookup is off (Settings > Food logging)."))
             }
         } catch {
-            step = .notFound(barcode: code, reason: String(localized: "Lookup failed. Check your connection."))
+            next = .notFound(barcode: code, reason: String(localized: "Lookup failed. Check your connection."))
         }
+        guard requestToken == token else { return }
+        step = next
+    }
+
+    /// One-tap re-log chips: the last 30 days ranked for this time of day, at most 8.
+    private func loadSuggestions() async {
+        guard let store = await model.store() else { return }
+        let now = Date()
+        let from = FoodDay.key(for: now.addingTimeInterval(-30 * 86_400))
+        guard let rows = try? await store.foodEntries(deviceId: FoodLog.deviceId, from: from, to: FoodDay.key(for: now))
+        else { return }
+        let ranked = TimeOfDaySuggestions.rank(
+            rows.map { (name: $0.name, productId: $0.productId, loggedAt: Date(timeIntervalSince1970: TimeInterval($0.loggedAt))) },
+            now: now, calendar: .current, limit: 8)
+        suggestions = ranked.map { rows[$0] }
+    }
+}
+
+/// Calm placeholder while a barcode lookup or a label read runs: a shimmering product card.
+private struct FoodWorkingView: View {
+    let text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
+            Text(text).font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
+            StrandCard {
+                VStack(alignment: .leading, spacing: NoopMetrics.space3) {
+                    Text(verbatim: "Product name here").font(StrandFont.title2)
+                    Text(verbatim: "Per 100 g: 000 kcal").font(StrandFont.footnote)
+                    Text(verbatim: "000 kcal").font(StrandFont.title1)
+                }
+            }
+            .foodShimmer()
+            Spacer()
+        }
+        .padding(NoopMetrics.screenPadding)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(StrandPalette.surfaceBase)
     }
 }
 #endif

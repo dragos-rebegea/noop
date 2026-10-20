@@ -22,71 +22,113 @@ struct FoodDayView: View {
 private struct FoodDayContent: View {
     @ObservedObject var model: FoodLogModel
     @Binding var adding: Bool
+    @State private var deletions = 0
+    @State private var relogs = 0
+
+    /// Today's entries grouped under meal slots derived from when they were logged.
+    private var groups: [(slot: MealSlot, rows: [FoodEntryRow])] {
+        let bySlot = Dictionary(grouping: model.entries) {
+            MealSlot.slot(for: Date(timeIntervalSince1970: TimeInterval($0.loggedAt)))
+        }
+        return MealSlot.allCases.compactMap { slot in
+            guard let rows = bySlot[slot], !rows.isEmpty else { return nil }
+            return (slot, rows.sorted { $0.loggedAt < $1.loggedAt })
+        }
+    }
 
     var body: some View {
         List {
             Section {
-                StrandCard {
-                    VStack(alignment: .leading, spacing: 10) {
-                        row("Calories", model.totals.kcal, model.targets.kcal, "kcal")
-                        row("Protein", model.totals.protein, model.targets.protein, "g")
-                        row("Carbs", model.totals.carbs, model.targets.carbs, "g")
-                        row("Fat", model.totals.fat, model.targets.fat, "g")
+                StrandCard(tint: StrandPalette.metricRose) {
+                    HStack(spacing: NoopMetrics.space4) {
+                        MacroRingView(value: model.totals.kcal, target: model.targets.kcal)
+                        MacroBarsView(totals: model.totals, targets: model.targets)
                     }
                 }
                 .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+                .listRowInsets(EdgeInsets(top: NoopMetrics.space2, leading: NoopMetrics.screenPadding,
+                                          bottom: NoopMetrics.space2, trailing: NoopMetrics.screenPadding))
             }
-            Section("Today") {
-                if model.entries.isEmpty {
-                    Text("Nothing logged yet.").font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
+            if model.entries.isEmpty {
+                Section {
+                    Text("Nothing logged yet. Tap + to photograph a meal, scan a barcode or describe what you ate.")
+                        .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
+                        .listRowBackground(Color.clear)
                 }
-                ForEach(model.entries) { e in
-                    HStack {
-                        VStack(alignment: .leading) {
-                            Text(e.name).font(StrandFont.subhead).foregroundStyle(StrandPalette.textPrimary)
-                            Text(Date(timeIntervalSince1970: TimeInterval(e.loggedAt)), style: .time)
-                                .font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
-                        }
-                        Spacer()
-                        Text(String(format: NSLocalizedString("%.0f kcal · P %.0f", comment: ""), e.kcal, e.proteinG))
-                            .font(StrandFont.captionNumber).foregroundStyle(StrandPalette.textSecondary)
+            }
+            ForEach(groups, id: \.slot) { group in
+                Section {
+                    ForEach(group.rows) { e in
+                        row(e)
+                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                Button(role: .destructive) {
+                                    deletions += 1
+                                    Task { await model.delete(e) }
+                                } label: { Label(String(localized: "Delete"), systemImage: "trash") }
+                            }
+                            .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                                Button {
+                                    Task { if await model.relog(e) { relogs += 1 } }
+                                } label: { Label(String(localized: "Log again"), systemImage: "arrow.counterclockwise") }
+                                .tint(StrandPalette.accent)
+                            }
                     }
-                }
-                .onDelete { idx in
-                    let rows = idx.map { model.entries[$0] }
-                    Task { for r in rows { await model.delete(r) } }
+                } header: {
+                    HStack {
+                        Text(group.slot.title)
+                        Spacer()
+                        Text(String(localized: "\(FoodNumber.string(group.rows.map(\.kcal).reduce(0, +))) kcal"))
+                            .monospacedDigit()
+                    }
+                    .font(StrandFont.overline)
+                    .foregroundStyle(StrandPalette.textTertiary)
                 }
             }
             if let err = model.errorMessage {
                 Text(err).font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
+                    .listRowBackground(Color.clear)
             }
         }
         .scrollContentBackground(.hidden)
         .background(StrandPalette.surfaceBase)
+        .animation(StrandMotion.gentle, value: model.entries.map(\.id))
+        .sensoryFeedback(.impact(weight: .medium), trigger: deletions)
+        .sensoryFeedback(.success, trigger: relogs)
         .navigationTitle("Food")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button { adding = true } label: { Image(systemName: "plus.circle.fill") }
+                    .accessibilityLabel(String(localized: "Add food"))
             }
         }
-        .sheet(isPresented: $adding, onDismiss: { Task { await model.load() } }) {
+        .fullScreenCover(isPresented: $adding, onDismiss: { Task { await model.load() } }) {
             FoodAddSheet(model: model)
         }
     }
 
-    private func row(_ label: LocalizedStringKey, _ value: Double, _ target: Double, _ unit: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text(label).font(StrandFont.subhead).foregroundStyle(StrandPalette.textPrimary)
+    private func row(_ e: FoodEntryRow) -> some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.space2) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: NoopMetrics.spaceHalf) {
+                    Text(e.name).font(StrandFont.subhead).foregroundStyle(StrandPalette.textPrimary)
+                    HStack(spacing: NoopMetrics.space1) {
+                        if let g = e.grams {
+                            Text(String(localized: "\(FoodNumber.string(g)) g"))
+                        }
+                        Text(Date(timeIntervalSince1970: TimeInterval(e.loggedAt)), style: .time)
+                    }
+                    .font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
+                }
                 Spacer()
-                Text(target > 0 ? String(format: "%.0f / %.0f %@", value, target, unit)
-                                : String(format: "%.0f %@", value, unit))
+                Text(String(localized: "\(FoodNumber.string(e.kcal)) kcal"))
                     .font(StrandFont.bodyNumber).foregroundStyle(StrandPalette.textPrimary)
             }
-            if target > 0 {
-                ProgressView(value: min(value / target, 1)).tint(StrandPalette.accent)
-            }
+            MacroCompositionBar(macros: e.macros)
         }
+        .padding(.vertical, NoopMetrics.spaceHalf)
+        .accessibilityElement(children: .combine)
+        .accessibilityValue(String(localized: "Protein \(FoodNumber.string(e.proteinG)) g, carbs \(FoodNumber.string(e.carbsG)) g, fat \(FoodNumber.string(e.fatG)) g"))
     }
 }
 #endif

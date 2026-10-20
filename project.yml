@@ -312,9 +312,9 @@ targets:
         # the mic button is disabled where the locale doesn't support that, never falls back to
         # server transcription. Only the resulting TEXT reaches the provider, via the same channel
         # a typed question already uses.
-        NSSpeechRecognitionUsageDescription: "NOOP transcribes your question on-device so you can ask the coach out loud instead of typing. Audio never leaves your iPhone."
+        NSSpeechRecognitionUsageDescription: "NOOP transcribes your question or meal description on-device so you can speak instead of typing. Audio never leaves your iPhone."
         NSCameraUsageDescription: "NOOP uses the camera to scan food barcodes and, when you choose, to photograph a meal or nutrition label for macro logging. Photos are not stored."
-        NSMicrophoneUsageDescription: "NOOP uses the microphone to let you ask the coach a question by voice. The audio is transcribed on-device and never leaves your iPhone."
+        NSMicrophoneUsageDescription: "NOOP uses the microphone to let you ask the coach a question or describe a meal by voice. The audio is transcribed on-device and never leaves your iPhone."
         # #187: the opt-in AI Coach's "Custom (OpenAI-compatible)" provider can point at a LOCAL LLM on
         # the LAN (Ollama / LM Studio at http://192.168.x.x:11434). ATS blocks cleartext by default;
         # NSAllowsLocalNetworking exempts loopback/.local/private-LAN hosts ONLY — public HTTPS endpoints
