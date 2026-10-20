@@ -5,7 +5,7 @@ import PackageDescription
 // the Open Food Facts / Claude reply decoders. Foundation only, so it builds and tests on Linux.
 let package = Package(
     name: "StrandNutrition",
-    platforms: [.macOS(.v13), .iOS(.v16), .watchOS(.v10)],
+    platforms: [.macOS(.v13), .iOS(.v16)],
     products: [.library(name: "StrandNutrition", targets: ["StrandNutrition"])],
     targets: [
         .target(name: "StrandNutrition"),
