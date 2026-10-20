@@ -7,7 +7,7 @@ upstream PR later (issue-first per `AGENTS.md`).
 
 Track daily calories, protein, carbs and fat with the least possible friction: snap a photo of a
 meal, scan a barcode, re-log a recent food, or type macros directly. Logged totals land in the same
-daily nutrition series (`metricSeries`, same keys) the CSV import feeds, under their own source `noop-food`; four `noop-food` catalog descriptors (label "Food log") make them appear in Compare and Explore. Coach does not read nutrition in v1.
+daily nutrition series (`metricSeries`, same keys) the CSV import feeds, under their own source `noop-food`; four `noop-food` catalog descriptors (label "Food log") make them appear in Compare and Explore. Coach reads the food log: with its data consent on, `buildFullContext()` adds a text summary (today's items and totals, targets, previous 6 days' totals).
 
 ## Decisions
 
@@ -152,5 +152,5 @@ cached with `origin = label` under the scanned barcode.
 ## Out of scope (v1)
 
 Android port; activity-adjusted targets; meal sections and saved combinations; micronutrients;
-Apple Health dietary writeback; storing photos; text food search; weight-goal targets; Coach reading nutrition; OpenAI and
+Apple Health dietary writeback; storing photos; text food search; weight-goal targets; OpenAI and
 Gemini vision for food (Anthropic only in v1); `.noopbak` whitelist entries for targets.

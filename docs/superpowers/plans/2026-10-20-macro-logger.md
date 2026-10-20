@@ -45,6 +45,7 @@
 | `Strand/Data/FoodProductLookup.swift` | Create | Cache-first barcode lookup, OFF fetch, settings keys. |
 | `Strand/Data/FoodLogModel.swift` | Create | `@MainActor` view model for the Food screens. |
 | `Strand/Screens/Food/*.swift` | Create | iOS-only screens (wrapped in `#if os(iOS)`). |
+| `Strand/AI/AICoach.swift` | Modify | Food-log summary block in the coach context (consent-gated). |
 | `Strand/Data/MetricCatalog.swift` | Modify | Four `noop-food` nutrition descriptors so logged totals reach Compare/Explore. |
 | `Strand/Data/DeviceRegistry.swift` (or the Settings delete flow) | Modify | "Delete all food data" purging `deviceId = noop-food`. |
 | `StrandiOS/App/RootTabView.swift` | Modify | `MoreDestination.food` + `MoreRow`. |
@@ -2508,6 +2509,171 @@ git commit -m "feat(food): logged totals in Compare/Explore; delete all food dat
 
 ---
 
+### Task 14c: Coach reads the food log
+
+Coach only receives health data when the user has turned on its data consent (`dataConsent`, key `ai.dataConsent`);
+`buildFullContext()` in `Strand/AI/AICoach.swift` (~line 956) is only reached with consent on and already appends
+summary lines (workouts, stress). The food log joins that same channel: a short text summary, never photos.
+
+**Files:**
+- Modify: `Strand/AI/AICoach.swift` (`buildFullContext()` ~line 956; add the block and its formatter next to `stressIndexLine()`)
+- Modify: `Packages/WhoopStore/Sources/WhoopStore/FoodLogStore.swift` (a range read for daily totals)
+- Test: `StrandTests/AICoachFoodContextTests.swift`, `Packages/WhoopStore/Tests/WhoopStoreTests/FoodLogStoreTests.swift`
+
+- [ ] **Step 1: Store range read (failing test first)**
+
+Append to `FoodLogStoreTests`:
+
+```swift
+    func testFoodEntriesInRange() async throws {
+        let store = try await WhoopStore.inMemory()
+        try await store.insertFoodEntries([entry("a", day: "2026-10-18"), entry("b", day: "2026-10-20"),
+                                           entry("c", day: "2026-10-21")])
+        let rows = try await store.foodEntries(deviceId: FoodLog.deviceId, from: "2026-10-18", to: "2026-10-20")
+        XCTAssertEqual(rows.map(\.id), ["a", "b"])
+    }
+```
+
+Run: `cd Packages/WhoopStore && swift test --filter FoodLogStoreTests` (expected: FAIL, no such overload). Then add to
+the `WhoopStore` extension in `FoodLogStore.swift`, directly after `foodEntries(deviceId:day:)`:
+
+```swift
+    /// Entries for an inclusive `yyyy-MM-dd` day range, oldest first.
+    public func foodEntries(deviceId: String, from: String, to: String) async throws -> [FoodEntryRow] {
+        try syncRead { db in
+            try Row.fetchAll(db, sql: """
+                SELECT * FROM foodEntry WHERE deviceId = ? AND day >= ? AND day <= ? ORDER BY day, loggedAt, id
+                """, arguments: [deviceId, from, to]).map(FoodEntryRow.decode)
+        }
+    }
+```
+
+Re-run: PASS.
+
+- [ ] **Step 2: Formatter test**
+
+```swift
+import XCTest
+import StrandNutrition
+import WhoopStore
+@testable import Strand
+
+final class AICoachFoodContextTests: XCTestCase {
+    private func row(_ day: String, _ name: String, _ grams: Double?, _ k: Double, _ p: Double, _ c: Double, _ f: Double,
+                     at: Int = 0) -> FoodEntryRow {
+        FoodEntryRow(id: UUID().uuidString, deviceId: FoodLog.deviceId, day: day, loggedAt: at, name: name, grams: grams,
+                     kcal: k, proteinG: p, carbsG: c, fatG: f, source: "quick", productId: nil)
+    }
+
+    func testNilWhenNothingLogged() {
+        XCTAssertNil(AICoachEngine.foodLogSummary(entries: [], today: "2026-10-20",
+                                                  targets: Macros(kcal: 0, protein: 0, carbs: 0, fat: 0)))
+    }
+
+    func testTodayItemsTotalsTargetsAndHistory() {
+        let entries = [
+            row("2026-10-18", "Oats", 80, 300, 10, 50, 5),
+            row("2026-10-20", "Chicken breast", 150, 248, 46.5, 0, 5.4, at: 1_760_950_800),
+            row("2026-10-20", "Rice", 200, 260, 5.4, 56, 0.6, at: 1_760_951_000),
+        ]
+        let s = AICoachEngine.foodLogSummary(entries: entries, today: "2026-10-20",
+                                             targets: Macros(kcal: 2400, protein: 180, carbs: 250, fat: 70))!
+        XCTAssertTrue(s.hasPrefix("Food log (logged in NOOP):"))
+        XCTAssertTrue(s.contains("Today so far: 508 kcal, protein 52 g, carbs 56 g, fat 6 g"))
+        XCTAssertTrue(s.contains("Daily targets: 2400 kcal, protein 180 g, carbs 250 g, fat 70 g"))
+        XCTAssertTrue(s.contains("Chicken breast 150 g"))
+        XCTAssertTrue(s.contains("2026-10-18: 300 kcal, P 10, C 50, F 5"))
+        XCTAssertFalse(s.contains("2026-10-19"))   // days with nothing logged are left out, not shown as zero
+    }
+
+    func testTargetsOmittedWhenUnset() {
+        let s = AICoachEngine.foodLogSummary(entries: [row("2026-10-20", "Apple", 150, 78, 0.4, 21, 0.3)],
+                                             today: "2026-10-20", targets: Macros(kcal: 0, protein: 0, carbs: 0, fat: 0))!
+        XCTAssertFalse(s.contains("Daily targets"))
+    }
+}
+```
+
+Run: `xcodegen generate && xcodebuild -project Strand.xcodeproj -scheme Strand -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO test -only-testing:StrandTests/AICoachFoodContextTests 2>&1 | tail -5`
+Expected: FAIL, `foodLogSummary` not found.
+
+- [ ] **Step 3: Implement the formatter and the block**
+
+Add `import StrandNutrition` to `AICoach.swift` if absent. Insert after the closing brace of `stressIndexSummary(si:)`
+(not between a doc comment and its declaration):
+
+```swift
+    /// The food-log block for the coach context: today's items, today's totals vs the user's targets, and
+    /// the daily totals of the previous days that have entries. Text only, under the same `dataConsent`
+    /// gate as the other summaries. nil when nothing is logged in the window, so the block is absent.
+    func foodLogBlock(days: Int = 7) async -> String? {
+        guard let store = await repo.storeHandle() else { return nil }
+        let today = FoodDay.key(for: Date())
+        let from = FoodDay.key(for: Calendar.current.date(byAdding: .day, value: -(days - 1), to: Date()) ?? Date())
+        let entries = (try? await store.foodEntries(deviceId: FoodLog.deviceId, from: from, to: today)) ?? []
+        let d = UserDefaults.standard
+        let targets = Macros(kcal: d.double(forKey: FoodLogModel.targetKeys.kcal),
+                             protein: d.double(forKey: FoodLogModel.targetKeys.protein),
+                             carbs: d.double(forKey: FoodLogModel.targetKeys.carbs),
+                             fat: d.double(forKey: FoodLogModel.targetKeys.fat))
+        return Self.foodLogSummary(entries: entries, today: today, targets: targets)
+    }
+
+    /// Pure formatter for the food-log block, unit-testable without a store.
+    static func foodLogSummary(entries: [FoodEntryRow], today: String, targets: Macros) -> String? {
+        guard !entries.isEmpty else { return nil }
+        func line(_ m: Macros) -> String {
+            String(format: "%.0f kcal, protein %.0f g, carbs %.0f g, fat %.0f g", m.kcal, m.protein, m.carbs, m.fat)
+        }
+        var out = ["Food log (logged in NOOP):"]
+        let todays = entries.filter { $0.day == today }.sorted { $0.loggedAt < $1.loggedAt }
+        out.append("Today so far: " + line(todays.map(\.macros).sum()))
+        if targets.kcal > 0 || targets.protein > 0 || targets.carbs > 0 || targets.fat > 0 {
+            out.append("Daily targets: " + line(targets))
+        }
+        if !todays.isEmpty {
+            let items = todays.map { e in e.grams.map { "\(e.name) \(Int($0.rounded())) g" } ?? e.name }
+            out.append("Today's items: " + items.joined(separator: "; "))
+        }
+        let earlier = Dictionary(grouping: entries.filter { $0.day < today }, by: \.day).sorted { $0.key < $1.key }
+        if !earlier.isEmpty {
+            out.append("Previous days (only days with entries):")
+            for (day, rows) in earlier {
+                let m = rows.map(\.macros).sum()
+                out.append(String(format: "%@: %.0f kcal, P %.0f, C %.0f, F %.0f", day, m.kcal, m.protein, m.carbs, m.fat))
+            }
+        }
+        return out.joined(separator: "\n")
+    }
+```
+
+In `buildFullContext()`, after the `stressIndexLine()` line, add:
+
+```swift
+        if let food = await foodLogBlock() { ctx += "\n\n" + food }
+```
+
+`FoodLogModel` lives in `Strand/Data` and is compiled for macOS too (only the screens are iOS-only), so this
+compiles on both targets.
+
+- [ ] **Step 4: Run tests and build both targets**
+
+Run: `cd Packages/WhoopStore && swift test --filter FoodLogStoreTests && cd ../.. && xcodebuild -project Strand.xcodeproj -scheme Strand -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO test -only-testing:StrandTests/AICoachFoodContextTests 2>&1 | tail -3 && xcodebuild -project Strand.xcodeproj -scheme NOOPiOS -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO build -quiet`
+Expected: all pass, iOS builds.
+
+- [ ] **Step 5: Privacy doc note** (folded into Task 15's AI Coach row edit)
+
+The AI Coach row's "What is sent" cell also gains: `; with data consent on, a text summary of the food log (today's items and totals, targets, the previous 6 days' totals)`.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add Strand/AI/AICoach.swift StrandTests/AICoachFoodContextTests.swift Packages/WhoopStore
+git commit -m "feat(food): coach context includes the food log summary"
+```
+
+---
+
 ### Task 15: Docs, translation and lint gates
 
 **Files:**
@@ -2597,7 +2763,8 @@ Expected: `App installed: bundleID: <BUNDLE_ID_PREFIX>.noop`. The camera permiss
 4. Barcode: scan a product not on OFF (or turn lookup off and scan a new one); photograph its nutrition table; Log.
 5. Recent: tap the first food to log it again; long-press to change the amount.
 6. Compare: pick "Protein" (Food log) and confirm today's value appears.
-7. Settings > Food logging > Delete all food data: the Food screen and Compare are empty afterwards.
+7. Coach (with data consent on): ask "how much protein have I eaten today?" and check it uses the logged numbers.
+8. Settings > Food logging > Delete all food data: the Food screen and Compare are empty afterwards.
 
 - [ ] **Step 5: Final commit if anything changed during verification**
 
