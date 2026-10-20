@@ -2774,3 +2774,122 @@ git add -A && git commit -m "fix(food): adjustments from device verification"
 ```
 
 (Only if Step 4 surfaced fixes. Never `git add -A` with untracked secrets: confirm `Config/BundleIdSecrets.xcconfig` is gitignored first with `git check-ignore Config/BundleIdSecrets.xcconfig`.)
+
+---
+
+## Follow-up (2026-10-20, user request): Today card and "describe meal"
+
+### Task 17: "Today's foods" card on the home screen
+
+A Bevel-style card: a calorie ring on the left (eaten vs target, centre "1,240 / of 2,400 kcal") and three macro
+columns (protein, carbs, fat), each with an icon, the grams eaten, a 6x8 dot grid filling toward that macro's target,
+and "of 180g" below it. Over target fills the grid and tints the number `StrandPalette.accent`. With no target the
+grams show and the grid stays empty. Tapping the card pushes the Food screen. Opt-in through Customise, like Hydration.
+
+**Files:**
+- Create: `Packages/StrandNutrition/Sources/StrandNutrition/MacroProgress.swift` + test `MacroProgressTests.swift`
+- Create: `Strand/Screens/Food/FoodTodayCard.swift` (iOS only)
+- Modify: `Strand/Data/FoodLogModel.swift` (post a change notification)
+- Modify: `Strand/Screens/DashboardCards.swift` (`case food` + its `title`/subtitle/`icon`/unit arms)
+- Modify: `Strand/Screens/TodayCustomizationMetadata.swift` (`customizationTint` arm, ~line 70)
+- Modify: `Strand/App/TabRoute.swift` (`case food` ~line 36, destination ~line 72, both `#if os(iOS)`)
+- Modify: `Strand/Liquid/LiquidTodayView.swift` (`liquidCard(for:)` ~line 989, beside `case .coach:` ~1099)
+- Modify: `Strand/Screens/TodayView.swift` (card switch ~2645-2653, tint switch ~2679, `dashboardValue` ~2791)
+- Modify: `Strand/Screens/SettingsView.swift` (post the change notification after "Delete all food data")
+
+- [ ] **Step 1: Pure progress math (TDD)** in StrandNutrition:
+
+```swift
+import Foundation
+
+/// Progress of an eaten amount toward a daily target, for rings and dot grids.
+public enum MacroProgress {
+    /// 0...1 fraction of `target` (0 when there is no target).
+    public static func fraction(_ value: Double, target: Double) -> Double {
+        guard target > 0, value.isFinite, value > 0 else { return 0 }
+        return min(value / target, 1)
+    }
+
+    /// Filled dots out of `total` (rounded down, so a dot means "earned"; full only at or over target).
+    public static func filledDots(_ value: Double, target: Double, total: Int) -> Int {
+        guard total > 0 else { return 0 }
+        if target > 0, value >= target { return total }
+        return Int((fraction(value, target: target) * Double(total)).rounded(.down))
+    }
+
+    public static func isOver(_ value: Double, target: Double) -> Bool { target > 0 && value > target }
+}
+```
+
+Tests (`MacroProgressTests.swift`): `fraction(52, target: 180)` is about 0.2889; `fraction(10, target: 0) == 0`;
+`fraction(300, target: 180) == 1`; `filledDots(52, target: 180, total: 48) == 13`; `filledDots(180, target: 180, total: 48) == 48`;
+`filledDots(179.9, target: 180, total: 48) == 47`; `filledDots(5, target: 0, total: 48) == 0`; `isOver(181, target: 180)`;
+`!isOver(181, target: 0)`. Run `cd Packages/StrandNutrition && swift test` (FAIL, then PASS).
+
+- [ ] **Step 2: Change notification.** In `FoodLogModel.swift` add, at file scope (outside the class):
+
+```swift
+extension Notification.Name {
+    /// Posted after any food-log write so the Today card refreshes without waiting for a data refresh.
+    static let foodLogDidChange = Notification.Name("noop.foodLogDidChange")
+}
+```
+
+Post `NotificationCenter.default.post(name: .foodLogDidChange, object: nil)` at the end of a successful `insert(_:)`
+(after `await load()`) and at the end of `delete(_:)`. In `SettingsView`'s "Delete all food data" Task, post it after
+`deleteAllData`.
+
+- [ ] **Step 3: `FoodTodayCard.swift`** (iOS only, `#if os(iOS)` around the file). It owns its loading and reads today's
+entries via `repo.storeHandle()` + `store.foodEntries(deviceId: FoodLog.deviceId, day: FoodDay.key(for: Date()))`, and
+targets from `FoodLogModel.targetKeys` in UserDefaults. Reload in `.task` and on
+`.onReceive(NotificationCenter.default.publisher(for: .foodLogDidChange))`. Layout per the description above, using
+`StrandPalette` / `StrandFont` / `NoopMetrics` tokens only; the ring is a `Circle().trim(from: 0, to: fraction)` stroke over a
+`StrandPalette.hairline` track; dot grids are `LazyVGrid` of 8 columns x 6 rows of small circles, filled with the macro's
+tint (protein `StrandPalette.metricRose`, carbs `StrandPalette.metricAmber`, fat `StrandPalette.metricCyan`) up to
+`MacroProgress.filledDots(..., total: 48)` and `StrandPalette.hairline` after. Icons: protein `"fish.fill"`, carbs
+`"leaf.fill"`, fat `"drop.fill"`. Wrap it in `NavigationLink(value: TabRoute.food)` with a plain button style, the header
+row "Today's foods" plus a trailing `"chevron.right"`. All user-visible strings live in THIS file (`String(localized:)`), so
+the home-screen i18n tests, which scan the Today files, see no new literals. Give it accessibility: one combined element
+reading "Today's foods, 1240 of 2400 kilocalories, protein 52 grams of 180, ...".
+
+- [ ] **Step 4: Register the card.** `DashboardCards.swift`: add `case food` (raw `"food"`) after `case hydration`; title
+`String(localized: "Today's foods")`, subtitle `"Calories and macros"`, icon `"fork.knife"`, unit `""`. Do NOT add it to
+`defaultSelection` (opt-in like Hydration). `TodayCustomizationMetadata.swift`: `customizationTint` arm
+`case .food: return StrandPalette.metricRose` (merge into an existing multi-case arm if the switch style prefers).
+
+- [ ] **Step 5: Route.** `TabRoute.swift`: `case food` after `case hydration`; in `tabRouteDestinations()` add
+`case .food:` -> `#if os(iOS) FoodDayView() #else EmptyView() #endif`. Fix any other exhaustive `switch` over `TabRoute`
+the compiler reports (add `.food` arms that mirror `.hydration`'s).
+
+- [ ] **Step 6: Render on both Today screens.** `LiquidTodayView.liquidCard(for:)`: `case .food:` ->
+`#if os(iOS) FoodTodayCard() #else EmptyView() #endif` (a full card, not a `cardLink` row). `TodayView`: in the card switch,
+`case .food:` the same; in the tint switch `case .food: return StrandPalette.metricRose`; in `dashboardValue`
+`case .food: return nil` (or the switch's "no value" form, matching `.coach`). Add NO string literals to these two files.
+
+- [ ] **Step 7: Verify** (controller runs xcodebuild): `swift test` in StrandNutrition; both app builds; StrandTests
+`TodayLayoutPrefsTests`, `HostedCardPrefsTests`, `RollingStepsAverageTests`; `python3 -m unittest Tools.test_home_i18n`
+(must stay green); `python3 Tools/doc_comment_lint.py`.
+
+### Task 18: "Describe meal" (text to macros via Claude)
+
+**Files:** `Strand/AI/AnthropicVision.swift`, `StrandTests/AnthropicVisionTests.swift`,
+`Packages/StrandNutrition/Sources/StrandNutrition/FoodVisionReply.swift`, `Strand/Data/FoodVisionService.swift`,
+`Strand/Screens/Food/FoodAddSheet.swift`.
+
+- [ ] **Step 1 (TDD):** make `AnthropicVision.makeRequest` / `run` take `jpeg: Data?`; when nil, the user content is only the
+text block. Test `testTextOnlyRequestHasNoImageBlock`: `content.count == 1`, `content[0]["type"] == "text"`, and
+`output_config.format.type == "json_schema"`. Existing image test unchanged.
+- [ ] **Step 2:** `FoodVisionReply.describePrompt(_ description: String) -> String`: "The user describes what they ate:
+\"<description>\". List each distinct food or drink with an estimated eaten portion in grams and typical energy and
+macronutrients per 100 g. If the text describes no food, return an empty items list." Reuse `mealSchemaJSON` and
+`decodeMeal`. Test that the prompt contains the description verbatim.
+- [ ] **Step 3:** `FoodVisionService.analyzeDescription(_ text: String) async throws -> [FoodVisionReply.MealItem]`
+(same credentials gate; no image).
+- [ ] **Step 4:** `FoodAddSheet`: a third secondary button "Describe" (`"text.bubble"`) opening a sheet with a multi-line
+`TextField` and a "Estimate" `NoopButton` (disabled when blank), then `.working`, then the existing `.confirm` step (the
+check-and-adjust screen; nothing saved before Log). It goes through the SAME gate as photos (credentials, then the
+one-time notice); change the notice title to "Sent to Anthropic" and its message to cover photos and descriptions.
+Entries log with `source: "describe"`.
+- [ ] **Step 5:** `docs/PRIVACY_SECURITY.md` AI Coach row: add "or a typed meal description" next to the meal photo text;
+`docs/FEATURES.md` Food section: add **Describe**.
+- [ ] **Step 6: Verify:** both app builds, `AnthropicVisionTests`, StrandNutrition tests.
