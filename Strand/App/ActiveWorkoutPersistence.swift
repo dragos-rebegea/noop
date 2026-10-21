@@ -34,6 +34,7 @@ enum ActiveWorkoutPersistence {
         var machineSamples: [MachineSample]? = []
         var lastMachineReading: FTMSReading? = nil
         var machineName: String? = nil
+        var machineTotals: MachineTotals? = nil
     }
 
     /// The single `UserDefaults` key (JSON-encoded `Snapshot`). Namespaced like `moments`/`sleepMarks`.
@@ -69,6 +70,7 @@ enum ActiveWorkoutPersistence {
             machineSamples: machineSamples,
             lastMachineReading: raw.lastMachineReading,
             machineName: raw.machineName,
+            machineTotals: raw.machineTotals,
         )
     }
 

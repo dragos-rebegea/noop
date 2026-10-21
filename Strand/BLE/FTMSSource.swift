@@ -199,11 +199,14 @@ public final class FTMSSource: NSObject, ObservableObject {
     /// Fold a decoded reading into the live state + published snapshot. HR (when present) rides the SAME
     /// `LiveState.heartRate` channel the WHOOP / standard-HR sources use, so the existing live-workout
     /// recorder scores it — no new scoring loop.
-    private func ingest(_ reading: FTMSReading) {
+    private func ingest(_ packet: FTMSReading) {
+        // A "More Data" split sends one logical reading over several packets, each with a subset of
+        // fields: keep the last known value per field rather than blanking the rest.
+        let reading = latest.map { $0.merging(packet) } ?? packet
         latest = reading
         switch role {
         case .activeDevice:
-            if let hr = reading.heartRate, hr >= 30, hr <= 220 {
+            if let hr = packet.heartRate, hr >= 30, hr <= 220 {
                 live.heartRate = hr
             }
             live.connected = true
@@ -287,6 +290,18 @@ extension FTMSSource: @preconcurrency CBCentralManagerDelegate {
                 break
             }
         default:
+            // Bluetooth off (or resetting): the link is gone and CoreBluetooth will not report a
+            // disconnect, so a companion that was not stopped on purpose parks its id. The `.poweredOn`
+            // replay above then reconnects it once the radio is back, with a fresh retry budget.
+            if role == .companion, !intentionallyStopped,
+               let id = peripheral?.identifier ?? pendingConnectID {
+                reconnectTask?.cancel()
+                reconnectTask = nil
+                reconnectAttempt = 0
+                pendingConnectID = id
+                seenPeripherals[id] = nil
+                peripheral = nil
+            }
             markDisconnected()
         }
     }

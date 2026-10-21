@@ -3009,6 +3009,10 @@ final class Repository: ObservableObject {
             if let route = oldRoute {
                 RouteStore.store(route, startTs: row.startTs, sport: row.sport)
             }
+            // FTMS companion data is keyed by (deviceId, startTs): copy it when the start moved, and let
+            // `deleteWorkouts` drop the old copy once no workout remains at the old key.
+            _ = try? await store.copyWorkoutMachine(deviceId: deviceId, fromStartTs: old.startTs,
+                                                    toStartTs: row.startTs)
             do {
                 _ = try await store.deleteWorkouts(deviceId: deviceId, sport: old.sport,
                                                    from: old.startTs, to: old.startTs)
@@ -3115,6 +3119,23 @@ final class Repository: ObservableObject {
         guard let store = await ensureStore() else { return }
         do { _ = try await store.upsertWorkouts([merged], deviceId: deviceId) }
         catch { return }
+
+        // Carry FTMS companion data onto the merged key BEFORE retiring the originals: `deleteWorkouts`
+        // drops a machine row once no workout remains at its key. One row survives (keyed by startTs
+        // only): the one already on the merged key, else the one with the most samples.
+        if (try? await store.workoutMachine(deviceId: deviceId, startTs: merged.startTs)) == nil {
+            var bestMachine: WorkoutMachineRow?
+            for r in rows where r.startTs != merged.startTs {
+                guard let m = try? await store.workoutMachine(deviceId: deviceId, startTs: r.startTs) else {
+                    continue
+                }
+                if bestMachine == nil || m.samplesJSON.count > bestMachine!.samplesJSON.count { bestMachine = m }
+            }
+            if let best = bestMachine {
+                _ = try? await store.copyWorkoutMachine(deviceId: deviceId, fromStartTs: best.startTs,
+                                                        toStartTs: merged.startTs)
+            }
+        }
 
         // Retire each original. Skip any row whose natural key matches the merged row's, so we never
         // dismiss/delete the span the merged row now owns.

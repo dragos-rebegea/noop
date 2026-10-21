@@ -186,17 +186,23 @@ extension WhoopStore {
     public func deleteWorkouts(deviceId: String, sport: String, from: Int, to: Int) async throws -> Int {
         try syncWrite { db in
             try db.execute(sql: """
-                DELETE FROM workoutMachine
-                WHERE deviceId = ? AND startTs IN (
-                    SELECT startTs FROM workout
-                    WHERE deviceId = ? AND sport = ? AND startTs >= ? AND startTs <= ?
-                )
-                """, arguments: [deviceId, deviceId, sport, from, to])
-            try db.execute(sql: """
                 DELETE FROM workout
                 WHERE deviceId = ? AND sport = ? AND startTs >= ? AND startTs <= ?
                 """, arguments: [deviceId, sport, from, to])
-            return db.changesCount
+            let deleted = db.changesCount
+            // FTMS companion data is keyed by (deviceId, startTs) only, so a sport edit (new row upserted
+            // at the same startTs, then the old sport deleted) must keep it. Drop a machine row only once
+            // no workout of any sport remains at its key.
+            try db.execute(sql: """
+                DELETE FROM workoutMachine
+                WHERE deviceId = ? AND startTs >= ? AND startTs <= ?
+                  AND NOT EXISTS (
+                    SELECT 1 FROM workout
+                    WHERE workout.deviceId = workoutMachine.deviceId
+                      AND workout.startTs = workoutMachine.startTs
+                  )
+                """, arguments: [deviceId, from, to])
+            return deleted
         }
     }
 

@@ -127,6 +127,7 @@ final class AppModel: ObservableObject {
         var usesCompanion: Bool = false
         var machineSamples: [MachineSample] = []
         var lastMachineReading: FTMSReading?
+        var machineTotals = MachineTotals()
         var machineName: String?
 
         var isPaused: Bool { pausedAt != nil }
@@ -152,19 +153,18 @@ final class AppModel: ObservableObject {
             return true
         }
 
-        mutating func recordMachineReading(_ reading: FTMSReading, elapsedSecond: Int) -> Bool {
-            lastMachineReading = reading
-            let sample = MachineSample(t: elapsedSecond, powerW: reading.powerWatts,
-                                       cadence: reading.cadence)
-            if let last = machineSamples.last, last.t == elapsedSecond {
-                let merged = MachineSample(t: elapsedSecond,
-                                           powerW: sample.powerW ?? last.powerW,
-                                           cadence: sample.cadence ?? last.cadence)
-                guard merged != last else { return false }
-                machineSamples[machineSamples.count - 1] = merged
-                return true
-            }
-            machineSamples.append(sample)
+        /// Folds an FTMS companion packet into the workout and says whether it appended a new per-second
+        /// sample. The reading is merged field by field (a "More Data" split sends a subset per packet) and
+        /// its cumulative counters feed `machineTotals` on every call; a sample is appended only for a
+        /// second that has none yet. `wallSecond` is the wall-clock offset from `start`, so the sample plots
+        /// on the same axis as heart rate. The caller publishes and persists only when this returns true.
+        mutating func recordMachineReading(_ reading: FTMSReading, wallSecond: Int) -> Bool {
+            let merged = lastMachineReading.map { $0.merging(reading) } ?? reading
+            lastMachineReading = merged
+            machineTotals.observe(reading)
+            if let last = machineSamples.last, last.t >= wallSecond { return false }
+            machineSamples.append(MachineSample(t: wallSecond, powerW: merged.powerWatts,
+                                                cadence: merged.cadence))
             return true
         }
 
@@ -257,6 +257,12 @@ final class AppModel: ObservableObject {
     @Published var bpm: Int?
     private var hrWindow: [(t: Date, v: Double)] = []
     private var hrCancellables = Set<AnyCancellable>()
+    /// Machine reading + counters newer than `activeWorkout`, held in memory between per-second samples.
+    private struct PendingMachine {
+        var reading: FTMSReading?
+        var totals: MachineTotals
+    }
+    private var pendingMachine: PendingMachine?
     /// Drives the READ spine off the registry's active device (#814 HIGH-1). A Devices-screen
     /// switch/remove/re-add calls `registry.setActive` DIRECTLY (not through `registerDevice`), so without
     /// this subscription the reads stayed pinned to whatever id was active at wiring time for the whole
@@ -313,8 +319,10 @@ final class AppModel: ObservableObject {
             guard let self else { return }
             self.ingestHR(heartRate: self.live.heartRate, rr: rr)
         }.store(in: &hrCancellables)
-        live.$machineReading.sink { [weak self] _ in
-            self?.captureWorkoutSample()
+        // Same willSet rule as above: hand the value being written, not `live.machineReading`, which still
+        // holds the previous packet when this runs.
+        live.$machineReading.sink { [weak self] reading in
+            self?.captureMachineReading(reading)
         }.store(in: &hrCancellables)
 
         // #2117: bank the device's R-R transport facts whenever a link comes up. Shell-independent on
@@ -682,6 +690,7 @@ final class AppModel: ObservableObject {
         self.sourceCoordinator = coordinator
         if activeWorkout?.usesCompanion == true { coordinator.startCompanion() }
         bindOuraFeatureStatusMirror()
+        bindCompanionMirror()
         // #814 READ SPINE (HIGH-1): drive the read side off the registry's `activeDeviceId` for the WHOLE
         // session, exactly as SourceCoordinator drives the WRITE side off the SAME publisher. A Devices-
         // screen switch/remove/re-add calls `registry.setActive` DIRECTLY (NOT through `registerDevice`), so
@@ -853,6 +862,7 @@ final class AppModel: ObservableObject {
         let name = sport.trimmingCharacters(in: .whitespaces)
         let resolved = name.isEmpty ? WorkoutCatalog.defaultSportName : name
         let started = Date()
+        pendingMachine = nil
         activeWorkout = ActiveWorkout(start: started, sport: resolved, usesCompanion: useCompanion,
                                       machineName: useCompanion ? ftmsCompanionDevice?.displayName : nil)
         // #524: arm GPS route recording for a distance-type sport (run / ride / walk / hike), mirroring
@@ -916,7 +926,11 @@ final class AppModel: ObservableObject {
     /// fixes are banked separately by `ActiveRouteStore`: keeping them out of here is what lets this stay
     /// a small per-sample write instead of rewriting a growing route on every beat.
     private func persistActiveWorkout() {
-        guard let w = activeWorkout else { return }
+        guard var w = activeWorkout else { return }
+        if let pending = pendingMachine {
+            w.lastMachineReading = pending.reading ?? w.lastMachineReading
+            w.machineTotals = pending.totals
+        }
         ActiveWorkoutPersistence.store(
             ActiveWorkoutPersistence.Snapshot(
                 startSec: Int(w.start.timeIntervalSince1970),
@@ -930,7 +944,8 @@ final class AppModel: ObservableObject {
                 usesCompanion: w.usesCompanion,
                 machineSamples: w.machineSamples,
                 lastMachineReading: w.lastMachineReading,
-                machineName: w.machineName))
+                machineName: w.machineName,
+                machineTotals: w.machineTotals))
     }
 
     /// If a manual workout was in flight when iOS killed the app, rebuild `activeWorkout` from the durable
@@ -950,6 +965,9 @@ final class AppModel: ObservableObject {
         w.usesCompanion = snap.usesCompanion ?? false
         w.machineSamples = snap.machineSamples ?? []
         w.lastMachineReading = snap.lastMachineReading
+        w.machineTotals = snap.machineTotals ?? MachineTotals()
+        // A relaunch cannot know what the machine counted while the app was dead: start a new segment.
+        w.machineTotals.breakSegment()
         w.machineName = snap.machineName
         activeWorkout = w
 
@@ -970,12 +988,15 @@ final class AppModel: ObservableObject {
 
     func toggleWorkoutPause() {
         guard var w = activeWorkout else { return }
+        foldPendingMachine(into: &w)
         if let pausedAt = w.pausedAt {
             w.pausedDuration += Date().timeIntervalSince(pausedAt)
             w.pausedAt = nil
             if activeWorkoutIsGps { gpsRecorder.resume() }
         } else {
             w.pausedAt = Date()
+            // Machine counters keep running while paused; bank the segment so that growth is not credited.
+            w.machineTotals.breakSegment()
             if activeWorkoutIsGps { gpsRecorder.pause() }
         }
         activeWorkout = w
@@ -986,6 +1007,7 @@ final class AppModel: ObservableObject {
     func discardWorkout() {
         guard activeWorkout != nil else { return }
         sourceCoordinator?.stopCompanion()
+        pendingMachine = nil
         activeWorkout = nil
         if activeWorkoutIsGps { gpsRecorder.stop() }
         activeWorkoutIsGps = false
@@ -1009,7 +1031,8 @@ final class AppModel: ObservableObject {
     }
 
     func endWorkout() {
-        guard let w = activeWorkout else { return }
+        guard var w = activeWorkout else { return }
+        foldPendingMachine(into: &w)
         sourceCoordinator?.stopCompanion()
         activeWorkout = nil
         let wasGps = activeWorkoutIsGps
@@ -1029,8 +1052,7 @@ final class AppModel: ObservableObject {
         let samples = w.samples
         // Save when there's an HR window OR a real GPS route , a GPS-only walk (HR not streaming) is
         // still a workout (parity with Android's `samples.size < 2 && track.size < 2` discard gate).
-        let machineSummary = MachineSummary.from(samples: w.machineSamples,
-                                                 lastReading: w.lastMachineReading)
+        let machineSummary = MachineSummary.from(samples: w.machineSamples, totals: w.machineTotals)
         let hasMachineData = !w.machineSamples.isEmpty || w.lastMachineReading != nil
         guard samples.count >= 2 || route != nil || hasMachineData else {
             // Workouts & GPS test mode: record WHY a session vanished (too short / no route), tagged `.workouts`.
@@ -1134,30 +1156,12 @@ final class AppModel: ObservableObject {
     /// from `ingestHR` on every fresh sample; a no-op when no workout is running. Recomputing strain
     /// over the growing window each sample is cheap at the ~1 Hz live-HR cadence.
     private func captureWorkoutSample() {
-        guard var w = activeWorkout, !w.isPaused else { return }
-        let now = Date()
-        var changed = false
-        if w.usesCompanion, live.machineState == .live, let reading = live.machineReading {
-            let previousReading = w.lastMachineReading
-            let sampleChanged = w.recordMachineReading(reading, elapsedSecond: Int(w.elapsed(at: now)))
-            w.machineName = live.machineName ?? w.machineName
-            changed = sampleChanged || previousReading != reading
-        }
-        guard let hr = bpm else {
-            if changed {
-                activeWorkout = w
-                persistActiveWorkout()
-            }
-            return
-        }
+        guard var w = activeWorkout, !w.isPaused, let hr = bpm else { return }
         // A second that already has its sample moves only the peak: publish that, and skip the rescore and the
         // snapshot (the next second's sample carries the peak into the snapshot).
         let peakBefore = w.peakHr
-        guard w.recordSample(HRSample(ts: Int(now.timeIntervalSince1970), bpm: hr)) else {
-            if w.peakHr != peakBefore || changed {
-                activeWorkout = w
-                persistActiveWorkout()
-            }
+        guard w.recordSample(HRSample(ts: Int(Date().timeIntervalSince1970), bpm: hr)) else {
+            if w.peakHr != peakBefore { activeWorkout = w }
             return
         }
         w.peakHr = max(w.peakHr, hr)
@@ -1167,6 +1171,32 @@ final class AppModel: ObservableObject {
         activeWorkout = w
         // Re-snapshot the durable session so a kill keeps the latest accumulated HR window (#529).
         persistActiveWorkout()
+    }
+
+    /// Folds one FTMS companion reading (the value the `@Published` sink is about to write) into the active
+    /// workout. Packets arrive several times a second, so only a newly appended per-second sample publishes
+    /// `activeWorkout` and rewrites the durable snapshot; between those, the merged reading and counter
+    /// totals stay in `pendingMachine`, which `foldPendingMachine` applies before any other write.
+    private func captureMachineReading(_ reading: FTMSReading?) {
+        guard let reading, var w = activeWorkout, w.usesCompanion, !w.isPaused,
+              live.machineState == .live else { return }
+        foldPendingMachine(into: &w)
+        let appended = w.recordMachineReading(reading, wallSecond: Int(Date().timeIntervalSince(w.start)))
+        guard appended else {
+            pendingMachine = PendingMachine(reading: w.lastMachineReading, totals: w.machineTotals)
+            return
+        }
+        w.machineName = live.machineName ?? w.machineName
+        activeWorkout = w
+        persistActiveWorkout()
+    }
+
+    /// Applies machine state held back from publishing (see `captureMachineReading`) to `w`.
+    private func foldPendingMachine(into w: inout ActiveWorkout) {
+        guard let pending = pendingMachine else { return }
+        pendingMachine = nil
+        w.lastMachineReading = pending.reading ?? w.lastMachineReading
+        w.machineTotals = pending.totals
     }
 
     /// Drop the smoothing window and blank the hero number so a resume / re-attach shows ","
@@ -1330,6 +1360,12 @@ final class AppModel: ObservableObject {
 
     var ftmsCompanionDevice: PairedDevice? { sourceCoordinator?.companionDevice }
 
+    /// Manual retry from the live workout card: restarts the companion link with a fresh attempt budget.
+    func retryFTMSCompanion() {
+        guard activeWorkout?.usesCompanion == true else { return }
+        sourceCoordinator?.retryCompanion()
+    }
+
     func setFTMSCompanion(_ device: PairedDevice?) {
         sourceCoordinator?.setCompanionDevice(device?.id)
         objectWillChange.send()
@@ -1430,6 +1466,17 @@ final class AppModel: ObservableObject {
             }
             .receive(on: DispatchQueue.main)
             .sink { [weak self] in self?.ouraLinkPhase = $0 }
+    }
+
+    /// Republishes when the coordinator's FTMS companion changes by any path (registry activation,
+    /// removal, the wizard), so the Devices screen's Companion pill never reads a stale slot.
+    private var companionDeviceIdCancellable: AnyCancellable?
+    private func bindCompanionMirror() {
+        guard let coordinator = sourceCoordinator else { return }
+        companionDeviceIdCancellable = coordinator.$companionDeviceId
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
     }
 
     /// Reconnect the active ring on the user's request from the Live console (#2305). Routed through the

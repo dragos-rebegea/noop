@@ -22,13 +22,15 @@ final class ActiveWorkoutPersistenceTests: XCTestCase {
         usesCompanion: Bool? = false,
         machineSamples: [MachineSample]? = [],
         lastMachineReading: FTMSReading? = nil,
-        machineName: String? = nil
+        machineName: String? = nil,
+        machineTotals: MachineTotals? = nil
     ) -> ActiveWorkoutPersistence.Snapshot {
         ActiveWorkoutPersistence.Snapshot(startSec: startSec, sport: sport, samples: samples,
                                           avgHr: avgHr, peakHr: peakHr, liveStrain: liveStrain,
                                           pausedAtSec: pausedAtSec, pausedDurationSec: pausedDurationSec,
                                           usesCompanion: usesCompanion, machineSamples: machineSamples,
-                                          lastMachineReading: lastMachineReading, machineName: machineName)
+                                          lastMachineReading: lastMachineReading, machineName: machineName,
+                                          machineTotals: machineTotals)
     }
 
     /// A throwaway, isolated defaults suite so the test never touches the real store.
@@ -67,16 +69,32 @@ final class ActiveWorkoutPersistenceTests: XCTestCase {
     func testMachineCompanionFieldsRoundTrip() {
         let reading = FTMSReading(kind: .indoorBike, cadence: 88, powerWatts: 240,
                                   distanceM: 5_000, totalEnergyKcal: 120, elapsedTimeSec: 900)
+        var totals = MachineTotals()
+        totals.observe(FTMSReading(kind: .indoorBike, distanceM: 4_000, totalEnergyKcal: 100, elapsedTimeSec: 600))
+        totals.observe(reading)
         let original = snapshot(
             usesCompanion: true,
             machineSamples: [MachineSample(t: 0, powerW: 200, cadence: 82),
                              MachineSample(t: 1, powerW: 240, cadence: 88)],
             lastMachineReading: reading,
-            machineName: "Bike")
+            machineName: "Bike",
+            machineTotals: totals)
 
         let decoded = ActiveWorkoutPersistence.decode(ActiveWorkoutPersistence.encode(original))
 
         XCTAssertEqual(decoded, original)
+        XCTAssertEqual(decoded?.machineTotals?.distanceM.total, 1_000)
+    }
+
+    /// A snapshot written before counter deltas existed has no `machineTotals` and still decodes.
+    func testSnapshotWithoutMachineTotalsDecodes() throws {
+        let data = try XCTUnwrap(ActiveWorkoutPersistence.encode(snapshot(usesCompanion: true)))
+        var json = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        json.removeValue(forKey: "machineTotals")
+        let legacy = try JSONSerialization.data(withJSONObject: json)
+        let decoded = ActiveWorkoutPersistence.decode(legacy)
+        XCTAssertNotNil(decoded)
+        XCTAssertNil(decoded?.machineTotals)
     }
 
     // MARK: - UserDefaults store / load / clear

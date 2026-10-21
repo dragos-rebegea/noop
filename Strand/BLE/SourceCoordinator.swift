@@ -344,18 +344,22 @@ final class SourceCoordinator: ObservableObject {
 
     // MARK: - FTMS companion
 
+    /// A companion must be a live FTMS registry row with a resolvable peripheral id: without one the
+    /// source could only scan, which never ends for a machine that is off or out of range.
+    static func isUsableCompanion(_ device: PairedDevice) -> Bool {
+        device.sourceKind == .ftms && device.status != .archived &&
+            device.peripheralId.flatMap(UUID.init(uuidString:)) != nil
+    }
+
     var companionDevice: PairedDevice? {
         guard let companionDeviceId else { return nil }
-        return registry.devices.first {
-            $0.id == companionDeviceId && $0.sourceKind == .ftms && $0.status != .archived
-        }
+        return registry.devices.first { $0.id == companionDeviceId && Self.isUsableCompanion($0) }
     }
 
     func setCompanionDevice(_ id: String?) {
         let validId = id.flatMap { candidate in
             registry.devices.first {
-                $0.id == candidate && $0.id != registry.activeDeviceId &&
-                    $0.sourceKind == .ftms && $0.status != .archived
+                $0.id == candidate && $0.id != registry.activeDeviceId && Self.isUsableCompanion($0)
             }?.id
         }
         if companionDeviceId != validId { stopCompanion() }
@@ -385,9 +389,12 @@ final class SourceCoordinator: ObservableObject {
         companionSource = source
         if let peripheralId = device.peripheralId, let uuid = UUID(uuidString: peripheralId) {
             source.connect(uuid)
-        } else {
-            source.scan()
         }
+    }
+
+    /// Manual retry after the automatic reconnects gave up: a fresh source starts with a zero attempt count.
+    func retryCompanion() {
+        startCompanion()
     }
 
     func stopCompanion() {

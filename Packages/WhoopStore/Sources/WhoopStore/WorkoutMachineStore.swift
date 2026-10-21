@@ -59,6 +59,26 @@ extension WhoopStore {
         }
     }
 
+    /// Copies the FTMS companion data at `fromStartTs` onto `toStartTs` (replacing any row there), for an
+    /// edit or merge that moves a workout's natural key. The source row is left in place, mirroring how
+    /// RouteStore routes are re-keyed: `deleteWorkouts` drops it once no workout remains at the old key,
+    /// so a failed delete keeps both complete versions. Returns true when a row was copied.
+    @discardableResult
+    public func copyWorkoutMachine(deviceId: String, fromStartTs: Int, toStartTs: Int) async throws -> Bool {
+        guard fromStartTs != toStartTs else { return false }
+        return try syncWrite { db in
+            try db.execute(sql: """
+                INSERT OR REPLACE INTO workoutMachine
+                    (deviceId, startTs, machineKind, machineName, avgPowerW, maxPowerW,
+                     avgCadence, distanceM, energyKcal, elapsedS, samplesJSON)
+                SELECT deviceId, ?, machineKind, machineName, avgPowerW, maxPowerW,
+                       avgCadence, distanceM, energyKcal, elapsedS, samplesJSON
+                FROM workoutMachine WHERE deviceId = ? AND startTs = ?
+                """, arguments: [toStartTs, deviceId, fromStartTs])
+            return db.changesCount > 0
+        }
+    }
+
     /// Returns FTMS companion data for the workout identified by device and start time.
     public func workoutMachine(deviceId: String, startTs: Int) async throws -> WorkoutMachineRow? {
         try syncRead { db in

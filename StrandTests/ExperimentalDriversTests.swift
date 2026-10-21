@@ -215,4 +215,72 @@ final class ExperimentalDriversTests: XCTestCase {
         XCTAssertEqual(stub.stopCalls, 1)
         XCTAssertEqual(stopWhoopCalls, 0)
     }
+
+    @MainActor
+    private func companionCoordinator(peripheralId: String?) async throws
+        -> (SourceCoordinator, CompanionStub, String, UserDefaults, String) {
+        let store = try await WhoopStore.inMemory()
+        let registry = DeviceRegistry(store: DeviceRegistryStore(dbQueue: store.registryWriter))
+        registry.reload()
+        let companionId = "ftms-" + UUID().uuidString
+        registry.add(PairedDevice(
+            id: companionId, brand: "Gym", model: "Bike", peripheralId: peripheralId,
+            sourceKind: .ftms, capabilities: [.hr], status: .paired, addedAt: 0, lastSeenAt: 0))
+        let suiteName = "SourceCoordinatorCompanionTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let stub = CompanionStub()
+        let coordinator = SourceCoordinator(
+            registry: registry,
+            live: LiveState(),
+            storeHandle: { nil },
+            startWhoop: {},
+            stopWhoop: {},
+            setWhoopPreferredPeripheral: { _ in },
+            setWhoopActiveDeviceId: { _ in },
+            connectedPeripheralUUID: Empty<String?, Never>().eraseToAnyPublisher(),
+            defaults: defaults,
+            makeCompanionSource: { _, _ in stub })
+        return (coordinator, stub, companionId, defaults, suiteName)
+    }
+
+    final class CompanionStub: LiveHRSource {
+        var scanCalls = 0
+        var connectCalls = 0
+        var stopCalls = 0
+        func scan() { scanCalls += 1 }
+        func connect(_ id: UUID) { connectCalls += 1 }
+        func stop() { stopCalls += 1 }
+    }
+
+    /// A companion row without a peripheral id could only scan, which never ends: it is not accepted.
+    @MainActor
+    func testCompanionWithoutPeripheralIdIsRejectedAndNeverScans() async throws {
+        let (coordinator, stub, companionId, defaults, suite) = try await companionCoordinator(peripheralId: nil)
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        coordinator.setCompanionDevice(companionId)
+        coordinator.startCompanion()
+
+        XCTAssertNil(coordinator.companionDeviceId)
+        XCTAssertNil(coordinator.companionDevice)
+        XCTAssertEqual(stub.scanCalls, 0)
+        XCTAssertEqual(stub.connectCalls, 0)
+    }
+
+    /// The manual Reconnect starts a fresh source (fresh retry budget) and connects again.
+    @MainActor
+    func testRetryCompanionReconnects() async throws {
+        let (coordinator, stub, companionId, defaults, suite) =
+            try await companionCoordinator(peripheralId: UUID().uuidString)
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        coordinator.setCompanionDevice(companionId)
+        coordinator.startCompanion()
+        coordinator.retryCompanion()
+
+        XCTAssertEqual(coordinator.companionDeviceId, companionId)
+        XCTAssertEqual(stub.connectCalls, 2)
+        XCTAssertEqual(stub.stopCalls, 1)
+        XCTAssertEqual(stub.scanCalls, 0)
+    }
 }

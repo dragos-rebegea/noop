@@ -53,18 +53,23 @@ final class WorkoutSampleOncePerSecondTests: XCTestCase {
         XCTAssertGreaterThan(effort(everyArrival), effort(clean))
     }
 
-    func testMachineReadingsKeepOneMergedSamplePerElapsedSecond() {
+    /// Packets inside one second fold into the merged reading but append nothing (so nothing is published or
+    /// persisted); the next second's sample carries every field seen so far.
+    func testMachineReadingsAppendOnlyOnANewSecond() {
         var workout = AppModel.ActiveWorkout(start: Date(timeIntervalSince1970: 5_000))
         XCTAssertTrue(workout.recordMachineReading(
-            FTMSReading(kind: .indoorBike, powerWatts: 210), elapsedSecond: 3))
+            FTMSReading(kind: .indoorBike, powerWatts: 210, distanceM: 1_000), wallSecond: 3))
+        XCTAssertFalse(workout.recordMachineReading(
+            FTMSReading(kind: .indoorBike, cadence: 84, distanceM: 1_005), wallSecond: 3))
+        XCTAssertEqual(workout.lastMachineReading?.powerWatts, 210)
+        XCTAssertEqual(workout.lastMachineReading?.cadence, 84)
         XCTAssertTrue(workout.recordMachineReading(
-            FTMSReading(kind: .indoorBike, cadence: 84), elapsedSecond: 3))
-        XCTAssertTrue(workout.recordMachineReading(
-            FTMSReading(kind: .indoorBike, cadence: 86, powerWatts: 230), elapsedSecond: 4))
+            FTMSReading(kind: .indoorBike, powerWatts: 230, distanceM: 1_012), wallSecond: 4))
 
         XCTAssertEqual(workout.machineSamples, [
-            MachineSample(t: 3, powerW: 210, cadence: 84),
-            MachineSample(t: 4, powerW: 230, cadence: 86),
+            MachineSample(t: 3, powerW: 210, cadence: nil),
+            MachineSample(t: 4, powerW: 230, cadence: 84),
         ])
+        XCTAssertEqual(workout.machineTotals.distanceM.total, 12)
     }
 }

@@ -65,7 +65,7 @@ struct LiveWorkoutView: View {
                 // standard fitness sensor is feeding metrics, refreshing on its own packets without
                 // re-rendering the HR hero / effort gauge above (scroll-stutter isolation).
                 SensorRowIfPresent()
-                MachineRowIfPresent()
+                MachineRowIfPresent(onReconnect: { model.retryFTMSCompanion() })
             }
             .screenPadding()
             .padding(.vertical, NoopMetrics.space6)
@@ -546,6 +546,8 @@ private struct SensorRowIfPresent: View {
 /// notifications do not invalidate the workout hero or heart-rate charts above it.
 private struct MachineRowIfPresent: View {
     @EnvironmentObject private var live: LiveState
+    /// Restarts the companion link with a fresh reconnect budget (the automatic retries give up after five).
+    let onReconnect: () -> Void
     @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
     @AppStorage(UnitPrefs.distanceSystemKey) private var distanceSystemRaw = ""
 
@@ -567,7 +569,7 @@ private struct MachineRowIfPresent: View {
         case .disconnected:
             let name = live.machineName ?? String(localized: "Gym equipment")
             statusCard(text: String(localized: "\(name) disconnected"),
-                       showsProgress: false)
+                       showsProgress: false, showsReconnect: true)
                 .staggeredAppear(index: 8)
         case .live:
             if let reading = live.machineReading {
@@ -577,7 +579,7 @@ private struct MachineRowIfPresent: View {
         }
     }
 
-    private func statusCard(text: String, showsProgress: Bool) -> some View {
+    private func statusCard(text: String, showsProgress: Bool, showsReconnect: Bool = false) -> some View {
         NoopCard(padding: NoopMetrics.cardInnerPadding, tint: StrandPalette.effortColor) {
             HStack(spacing: NoopMetrics.space3) {
                 if showsProgress {
@@ -588,6 +590,12 @@ private struct MachineRowIfPresent: View {
                     .font(StrandFont.subhead)
                     .foregroundStyle(StrandPalette.textSecondary)
                 Spacer(minLength: 0)
+                if showsReconnect {
+                    Button(String(localized: "Reconnect"), action: onReconnect)
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(StrandPalette.effortColor)
+                        .buttonStyle(.plain)
+                }
             }
         }
     }
