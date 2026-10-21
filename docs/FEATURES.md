@@ -311,6 +311,18 @@ Windows are taken relative to your latest recorded day and auto-widen on sparse 
   source. An optional per-workout toggle connects the machine only while recording. Live power,
   cadence, speed, distance, machine calories, and machine time are read from notifications and stored
   locally with the workout. The connection is read-only and never uses the FTMS Control Point.
+- **Bike training (indoor bike companion)**: with power coming from an FTMS indoor bike (for example
+  a Concept2 BikeErg), the live screen switches to a riding layout: 3 second power as the hero,
+  coloured by Coggan power zone with % of FTP, a target intensity band in watts, average power,
+  Normalized Power, IF and heart rate, laps (lap button in the control bar), kJ, live HR drift once
+  eligible, and fuelling reminders ("Fuel: N g carbs") on a configurable interval. The saved ride
+  gets a power summary computed from the stored samples: NP, IF, TSS, VI, kJ, W/kg, aerobic
+  decoupling (Pw:HR) with a verdict, time in power zones, best 5 s / 1 / 5 / 20 / 60 min power, a
+  laps table, and an FTP estimate with a confirmed update. A guided 20 minute FTP test (warm-up,
+  openers, test, cool-down) shows each step's countdown and offers the new FTP at the end. FTP,
+  target band and fuelling live in Settings, Bike training; each ride stores the FTP it was recorded
+  with, so later FTP changes do not rewrite past IF / TSS. Steps are advisory: NOOP never sets the
+  machine's resistance.
 
 ---
 

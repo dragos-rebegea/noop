@@ -84,7 +84,7 @@ struct LiveBikeDashboard: View {
             chip("\(String(localized: "Effort")) \(UnitFormatter.effortDisplay(w.liveStrain, scale: effortScale))",
                  tint: StrandPalette.effortColor)
             if let drift = summary.decouplingPct {
-                chip(String(localized: "HR drift \(String(format: "%.1f", drift))%"),
+                chip("\(String(localized: "HR drift")) \(BikeFormat.percent1(drift))",
                      tint: Self.driftColor(DecouplingVerdict(percent: drift)))
             }
             Spacer(minLength: 0)
@@ -159,7 +159,7 @@ struct LiveBikeDashboard: View {
                         .foregroundStyle(StrandPalette.textSecondary)
                     Spacer(minLength: 0)
                     if let zone {
-                        Text("Z\(zone.rawValue) \(PowerZoneLabel.name(zone))")
+                        Text(verbatim: BikeFormat.zoneTag(zone.rawValue, PowerZoneLabel.name(zone)))
                             .textCase(.uppercase)
                             .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
                             .foregroundStyle(tint)
@@ -342,7 +342,7 @@ private struct GuidedStepCard: View {
                                     .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
                                     .foregroundStyle(StrandPalette.textSecondary)
                                 Spacer(minLength: 0)
-                                Text("\(Int(mean.rounded())) W")
+                                Text(verbatim: BikeFormat.watts(mean))
                                     .font(StrandFont.number(28)).monospacedDigit()
                                     .foregroundStyle(StrandPalette.statusWarning)
                             }

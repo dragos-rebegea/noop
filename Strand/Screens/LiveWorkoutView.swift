@@ -140,9 +140,9 @@ struct LiveWorkoutView: View {
             }
         } message: {
             if let previous = BikeTrainingPrefs.ftp() {
-                Text("95% of your 20 minute test average. Was \(previous) W.")
+                Text("95 percent of your 20 minute test average. Was \(previous) W.")
             } else {
-                Text("95% of your 20 minute test average.")
+                Text("95 percent of your 20 minute test average.")
             }
         }
         .onDisappear {

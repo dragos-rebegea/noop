@@ -77,3 +77,11 @@ enum BikeTrainingPrefs {
         return abs(Double(estimate - current)) / Double(current) > 0.03
     }
 }
+
+/// Unit-suffixed figures for the bike screens. Numbers and units only, nothing to translate.
+enum BikeFormat {
+    static func percent1(_ value: Double) -> String { String(format: "%.1f", value) + "%" }
+    static func wattsPerKg(_ value: Double) -> String { String(format: "%.1f", value) + " W/kg" }
+    static func watts(_ value: Double) -> String { "\(Int(value.rounded())) W" }
+    static func zoneTag(_ zone: Int, _ name: String) -> String { "Z\(zone) \(name)" }
+}

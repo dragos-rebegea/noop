@@ -97,7 +97,7 @@ struct RideSummarySection: View {
                     Text("Aerobic decoupling").strandOverline()
                     if let pct = s.decouplingPct {
                         let verdict = DecouplingVerdict(percent: pct)
-                        Text(String(format: "%.1f%%", pct))
+                        Text(verbatim: BikeFormat.percent1(pct))
                             .font(StrandFont.number(34)).monospacedDigit()
                             .foregroundStyle(LiveBikeDashboard.driftColor(verdict))
                         Text(Self.verdictText(verdict))
@@ -113,7 +113,7 @@ struct RideSummarySection: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        caption(String(localized: "Power to heart rate in the second half against the first, after a 10 minute warm-up. Under 5% means your aerobic base held."))
+        caption(String(localized: "Power to heart rate in the second half against the first, after a 10 minute warm-up. Under 5 percent means your aerobic base held."))
     }
 
     static func verdictText(_ v: DecouplingVerdict) -> String {
@@ -149,7 +149,7 @@ struct RideSummarySection: View {
             HStack {
                 RoundedRectangle(cornerRadius: 2, style: .continuous)
                     .fill(color).frame(width: 9, height: 9)
-                Text("Z\(zone.rawValue) \(PowerZoneLabel.name(zone))")
+                Text(verbatim: BikeFormat.zoneTag(zone.rawValue, PowerZoneLabel.name(zone)))
                     .font(StrandFont.subhead).foregroundStyle(StrandPalette.textPrimary)
                 Spacer(minLength: 0)
                 Text(ActiveWorkoutClock.clock(seconds))
@@ -186,7 +186,7 @@ struct RideSummarySection: View {
                                                      ? StrandPalette.textTertiary : StrandPalette.textPrimary)
                                     .lineLimit(1).minimumScaleFactor(0.6)
                                 if let weightKg, weightKg > 0, let w = s.bestPowers[window] {
-                                    Text(String(format: "%.1f W/kg", w / weightKg))
+                                    Text(verbatim: BikeFormat.wattsPerKg(w / weightKg))
                                         .font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
                                         .lineLimit(1).minimumScaleFactor(0.7)
                                 }
@@ -251,7 +251,7 @@ struct RideSummarySection: View {
                     VStack(alignment: .leading, spacing: NoopMetrics.space1) {
                         Text("Estimated FTP: \(estimate) W")
                             .font(StrandFont.headline).foregroundStyle(StrandPalette.textPrimary)
-                        Text("95% of your best 20 minutes on this ride.")
+                        Text("95 percent of your best 20 minutes on this ride.")
                             .font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
                     }
                     Spacer(minLength: 0)
