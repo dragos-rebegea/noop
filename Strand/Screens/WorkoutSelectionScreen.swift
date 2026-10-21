@@ -1,5 +1,6 @@
 import SwiftUI
 import StrandDesign
+import StrandAnalytics
 
 // MARK: - Workout selection browser
 //
@@ -10,7 +11,7 @@ import StrandDesign
 /// Public entry used by Live / Workouts. Keeps the prior `onStart` + optional title overrides so the
 /// merge-name prompt can reuse the same browser.
 struct StartWorkoutSheet: View {
-    let onStart: (_ sport: String, _ useCompanion: Bool) -> Void
+    let onStart: (_ sport: String, _ useCompanion: Bool, _ guided: GuidedSessionKind?) -> Void
     private let companionName: String?
     private let heading: String
     private let explainer: String
@@ -18,7 +19,7 @@ struct StartWorkoutSheet: View {
 
     init(title: String? = nil, subtitle: String? = nil, actionVerb: String? = nil,
          onStart: @escaping (_ sport: String) -> Void) {
-        self.onStart = { sport, _ in onStart(sport) }
+        self.onStart = { sport, _, _ in onStart(sport) }
         self.companionName = nil
         self.heading = title ?? String(localized: "Choose a workout")
         self.explainer = subtitle
@@ -28,7 +29,7 @@ struct StartWorkoutSheet: View {
 
     init(title: String? = nil, subtitle: String? = nil, actionVerb: String? = nil,
          companionName: String?,
-         onStart: @escaping (_ sport: String, _ useCompanion: Bool) -> Void) {
+         onStart: @escaping (_ sport: String, _ useCompanion: Bool, _ guided: GuidedSessionKind?) -> Void) {
         self.onStart = onStart
         self.companionName = companionName
         self.heading = title ?? String(localized: "Choose a workout")
@@ -50,12 +51,14 @@ struct WorkoutSelectionScreen: View {
     let explainer: String
     let actionVerb: String
     let companionName: String?
-    let onStart: (_ sport: String, _ useCompanion: Bool) -> Void
+    let onStart: (_ sport: String, _ useCompanion: Bool, _ guided: GuidedSessionKind?) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
     @State private var selectedSport: WorkoutCatalog.Sport?
     @State private var useCompanion = false
+    /// Run the guided 20 minute FTP test over this ride (indoor cycle with the machine only).
+    @State private var ftpTest = false
     @FocusState private var searchFocused: Bool
 
     private var trimmedQuery: String { query.trimmingCharacters(in: .whitespaces) }
@@ -180,14 +183,20 @@ struct WorkoutSelectionScreen: View {
             return
         }
         useCompanion = WorkoutCompanionPrefs.useCompanion(for: sport)
+        ftpTest = false
         selectedSport = sport
     }
 
-    private func begin(_ sport: WorkoutCatalog.Sport, useCompanion: Bool) {
+    private func begin(_ sport: WorkoutCatalog.Sport, useCompanion: Bool, guided: GuidedSessionKind? = nil) {
         RecentSportsPrefs.recordSelection(sport.name)
         WorkoutCompanionPrefs.set(useCompanion, for: sport)
-        onStart(sport.name, useCompanion)
+        onStart(sport.name, useCompanion, useCompanion ? guided : nil)
         dismiss()
+    }
+
+    /// The guided FTP test is offered for an indoor ride on the companion machine (it needs power).
+    static func offersFTPTest(_ sport: WorkoutCatalog.Sport) -> Bool {
+        sport.name == "Indoor cycle"
     }
 
     private func companionConfirmation(sport: WorkoutCatalog.Sport,
@@ -212,8 +221,25 @@ struct WorkoutSelectionScreen: View {
                 .tint(StrandPalette.accent)
             }
 
+            if Self.offersFTPTest(sport), useCompanion {
+                StrandCard {
+                    Toggle(isOn: $ftpTest) {
+                        VStack(alignment: .leading, spacing: NoopMetrics.space1) {
+                            Text("FTP test (20 min)")
+                                .font(StrandFont.headline)
+                                .foregroundStyle(StrandPalette.textPrimary)
+                            Text("Guided: 10 min warm-up, 3 short efforts, 5 min easy, 20 min all-out, 10 min cool-down. About 51 minutes. You set the resistance on the machine.")
+                                .font(StrandFont.footnote)
+                                .foregroundStyle(StrandPalette.textSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .tint(StrandPalette.accent)
+                }
+            }
+
             NoopButton(LocalizedStringKey(actionVerb), systemImage: "play.fill", kind: .primary, fullWidth: true) {
-                begin(sport, useCompanion: useCompanion)
+                begin(sport, useCompanion: useCompanion, guided: ftpTest ? .ftpTest : nil)
             }
             NoopButton("Choose another workout", systemImage: "chevron.left", kind: .secondary,
                        fullWidth: true) {

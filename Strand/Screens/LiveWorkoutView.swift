@@ -39,6 +39,9 @@ struct LiveWorkoutView: View {
     /// control must not end the workout instantly with no way back.
     @State private var showEndConfirm = false
     @State private var showDeleteConfirm = false
+    /// The guided FTP test result waiting for Save / Not now.
+    @State private var ftpTestResult: Int?
+    private var pendingGuidedFTP: Int? { model.activeWorkout?.pendingGuidedFTP() }
 
     /// The riding-first bike layout replaces the HR-led one for an indoor-bike companion ride with power.
     private var isBikeLayout: Bool { model.activeWorkout?.isBikeRide == true }
@@ -120,6 +123,28 @@ struct LiveWorkoutView: View {
         }
         // The bike layout can begin after the screen appears (power arrives a few seconds in).
         .onChangeCompat(of: isBikeLayout) { bike in if bike { ScreenIdle.keepAwake(true) } }
+        // The guided FTP test offers its result as soon as the test step completes (or when the screen
+        // comes back after it completed out of view).
+        .onChangeCompat(of: pendingGuidedFTP) { ftp in if let ftp, ftpTestResult == nil { ftpTestResult = ftp } }
+        .onAppear { if let ftp = pendingGuidedFTP { ftpTestResult = ftp } }
+        .alert(String(localized: "New FTP: \(ftpTestResult ?? 0) W"),
+               isPresented: Binding(get: { ftpTestResult != nil }, set: { if !$0 { ftpTestResult = nil } })) {
+            Button("Save") {
+                BikeTrainingPrefs.setFTP(ftpTestResult)
+                model.markGuidedFTPOffered()
+                ftpTestResult = nil
+            }
+            Button("Not now", role: .cancel) {
+                model.markGuidedFTPOffered()
+                ftpTestResult = nil
+            }
+        } message: {
+            if let previous = BikeTrainingPrefs.ftp() {
+                Text("95% of your 20 minute test average. Was \(previous) W.")
+            } else {
+                Text("95% of your 20 minute test average.")
+            }
+        }
         .onDisappear {
             model.stopRealtimeHR()
             // Always release on the way out so the system idle timer resumes. Even if the toggle was

@@ -179,8 +179,8 @@ struct LiveView: View {
         // Pick a named sport before starting (#519) — the live workout view then opens
         // off the activeWorkout change above, so no extra navigation is needed here.
         .workoutSelectionCover(isPresented: $showStartSport) {
-            StartWorkoutSheet(companionName: model.ftmsCompanionDevice?.displayName) { name, useCompanion in
-                model.startWorkout(sport: name, useCompanion: useCompanion)
+            StartWorkoutSheet(companionName: model.ftmsCompanionDevice?.displayName) { name, useCompanion, guided in
+                model.startWorkout(sport: name, useCompanion: useCompanion, guided: guided)
             }
         }
         // Manual HRV snapshot (#127) — a still, seated 60s R-R reading.

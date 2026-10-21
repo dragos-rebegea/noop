@@ -64,6 +64,7 @@ struct LiveBikeDashboard: View {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
                 chips(w, summary: summary)
                 if w.fuelReminderPending { fuelBanner }
+                if w.guided != nil { GuidedStepCard(workout: w) }
                 powerHero(power3s)
                 rideTiles(summary)
                 lapCard(w)
@@ -293,6 +294,87 @@ struct LiveBikeDashboard: View {
 
     private var tileDivider: some View {
         Rectangle().fill(StrandPalette.hairline).frame(width: 1, height: 44)
+    }
+}
+
+/// The guided session's current step, its countdown and the next step. During the FTP test step it also
+/// shows the running test average. Ticks on its own one-second timeline.
+private struct GuidedStepCard: View {
+    let workout: AppModel.ActiveWorkout
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            let position = workout.guidedPosition(at: context.date)
+            NoopCard(padding: NoopMetrics.cardInnerPadding, tint: StrandPalette.accent) {
+                if let position {
+                    VStack(alignment: .leading, spacing: NoopMetrics.space2) {
+                        HStack(alignment: .firstTextBaseline) {
+                            Text("FTP TEST \(position.index + 1)/\(workout.guided?.steps.count ?? 0)")
+                                .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
+                                .foregroundStyle(StrandPalette.textSecondary)
+                            Spacer(minLength: 0)
+                            if let next = position.next {
+                                Text("Next: \(Self.name(next.kind)) \(ActiveWorkoutClock.clock(next.durationSec))")
+                                    .font(StrandFont.captionNumber)
+                                    .foregroundStyle(StrandPalette.textSecondary)
+                                    .lineLimit(1).minimumScaleFactor(0.7)
+                            }
+                        }
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(Self.name(position.step.kind))
+                                .font(StrandFont.rounded(30, weight: .bold))
+                                .foregroundStyle(position.step.kind == .test || position.step.kind == .hard
+                                                 ? StrandPalette.statusWarning : StrandPalette.textPrimary)
+                                .lineLimit(1).minimumScaleFactor(0.6)
+                            Spacer(minLength: 0)
+                            Text(ActiveWorkoutClock.clock(position.remainingSec))
+                                .font(StrandFont.number(40)).monospacedDigit()
+                                .foregroundStyle(StrandPalette.textPrimary)
+                                .lineLimit(1).minimumScaleFactor(0.6)
+                        }
+                        Text(Self.cue(position.step.kind))
+                            .font(StrandFont.footnote)
+                            .foregroundStyle(StrandPalette.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if position.step.kind == .test, let mean = workout.guidedTestPower.mean {
+                            HStack {
+                                Text("TEST AVG")
+                                    .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
+                                    .foregroundStyle(StrandPalette.textSecondary)
+                                Spacer(minLength: 0)
+                                Text("\(Int(mean.rounded())) W")
+                                    .font(StrandFont.number(28)).monospacedDigit()
+                                    .foregroundStyle(StrandPalette.statusWarning)
+                            }
+                        }
+                    }
+                } else {
+                    Text("FTP test complete. Keep spinning easy or end the ride.")
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                }
+            }
+        }
+    }
+
+    static func name(_ kind: GuidedStep.Kind) -> String {
+        switch kind {
+        case .warmup: return String(localized: "Warm-up")
+        case .hard: return String(localized: "Hard")
+        case .easy: return String(localized: "Easy")
+        case .test: return String(localized: "All-out 20 min")
+        case .cooldown: return String(localized: "Cool-down")
+        }
+    }
+
+    static func cue(_ kind: GuidedStep.Kind) -> String {
+        switch kind {
+        case .warmup: return String(localized: "Easy spin, build gradually.")
+        case .hard: return String(localized: "Hard effort, well above threshold.")
+        case .easy: return String(localized: "Spin easy and recover.")
+        case .test: return String(localized: "Hold the highest steady power you can for the full 20 minutes.")
+        case .cooldown: return String(localized: "Spin easy to cool down.")
+        }
     }
 }
 

@@ -1,5 +1,6 @@
 import Foundation
 import WhoopProtocol
+import StrandAnalytics
 
 /// Durable persistence for an in-flight, manually-started workout (#529).
 ///
@@ -38,6 +39,10 @@ enum ActiveWorkoutPersistence {
         var laps: [MachineLap]? = nil
         var fuelRemindersFired: Int? = nil
         var fuelRemindersSeen: Int? = nil
+        var guided: GuidedSessionKind? = nil
+        var guidedStepIndex: Int? = nil
+        var guidedTestPower: GuidedTestPower? = nil
+        var guidedFTPOffered: Bool? = nil
     }
 
     /// The single `UserDefaults` key (JSON-encoded `Snapshot`). Namespaced like `moments`/`sleepMarks`.
@@ -77,6 +82,10 @@ enum ActiveWorkoutPersistence {
             laps: raw.laps.map { $0.filter { $0.startT >= 0 && $0.endT > $0.startT } },
             fuelRemindersFired: raw.fuelRemindersFired.map { max(0, $0) },
             fuelRemindersSeen: raw.fuelRemindersSeen.map { max(0, $0) },
+            guided: raw.guided,
+            guidedStepIndex: raw.guidedStepIndex,
+            guidedTestPower: raw.guidedTestPower,
+            guidedFTPOffered: raw.guidedFTPOffered,
         )
     }
 

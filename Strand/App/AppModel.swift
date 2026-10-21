@@ -134,8 +134,46 @@ final class AppModel: ObservableObject {
         /// Fuelling reminders fired so far, and how many of them the rider has dismissed.
         var fuelRemindersFired = 0
         var fuelRemindersSeen = 0
+        /// The guided session script running over this workout (the FTP test), if any.
+        var guided: GuidedSessionKind?
+        /// The step index last announced (-1 before the first; `steps.count` once the script finished).
+        var guidedStepIndex = -1
+        /// Power recorded during the guided test step.
+        var guidedTestPower = GuidedTestPower()
+        /// Whether the FTP result has been offered to the rider.
+        var guidedFTPOffered = false
 
         var isPaused: Bool { pausedAt != nil }
+
+        /// The guided step under the active elapsed time.
+        func guidedPosition(at now: Date = Date()) -> GuidedPosition? {
+            guided?.position(atElapsed: Int(elapsed(at: now)))
+        }
+
+        /// Moves the announced guided step forward and says whether it changed to a new step after the
+        /// first (the start itself already buzzes).
+        mutating func advanceGuided(at now: Date = Date()) -> Bool {
+            guard let guided, !isPaused else { return false }
+            let index = guidedPosition(at: now)?.index ?? guided.steps.count
+            guard index != guidedStepIndex else { return false }
+            let announced = guidedStepIndex >= 0
+            guidedStepIndex = index
+            return announced
+        }
+
+        /// Credits a recorded power second to the test mean when the guided test step is running.
+        mutating func recordGuidedPower(_ watts: Int?, at now: Date = Date()) {
+            guard let watts, !isPaused, guidedPosition(at: now)?.step.kind == .test else { return }
+            guidedTestPower.add(watts)
+        }
+
+        /// The FTP from a completed guided test that has not been offered yet; nil otherwise (no test,
+        /// the test step still running, too little power recorded, or already offered).
+        func pendingGuidedFTP(at now: Date = Date()) -> Int? {
+            guard !guidedFTPOffered, let window = guided?.testWindow,
+                  Int(elapsed(at: now)) >= window.upperBound else { return nil }
+            return guidedTestPower.ftp()
+        }
 
         /// True for an indoor-bike companion ride that has reported power: the live screen switches to
         /// the bike layout. Sticky once power has been seen, so a dropped link keeps the layout.
@@ -879,7 +917,8 @@ final class AppModel: ObservableObject {
     /// name; callers that don't pick a sport get the catalogue default "Other", parity with Android's
     /// `startWorkout(sport:)`). The active card on Live then shows elapsed time, live HR and strain
     /// building; End scores + saves it under this sport. Confirms with a single buzz. (#519)
-    func startWorkout(sport: String = WorkoutCatalog.defaultSportName, useCompanion: Bool = false) {
+    func startWorkout(sport: String = WorkoutCatalog.defaultSportName, useCompanion: Bool = false,
+                      guided: GuidedSessionKind? = nil) {
         guard activeWorkout == nil else { return }
         lastWorkout = nil
         let name = sport.trimmingCharacters(in: .whitespaces)
@@ -887,7 +926,8 @@ final class AppModel: ObservableObject {
         let started = Date()
         pendingMachine = nil
         activeWorkout = ActiveWorkout(start: started, sport: resolved, usesCompanion: useCompanion,
-                                      machineName: useCompanion ? ftmsCompanionDevice?.displayName : nil)
+                                      machineName: useCompanion ? ftmsCompanionDevice?.displayName : nil,
+                                      guided: guided)
         // #524: arm GPS route recording for a distance-type sport (run / ride / walk / hike), mirroring
         // Android, which defaults GPS on for `isDistanceSport`. Manual-first / opt-in: only these sports
         // record a route, and the recorder still captures nothing unless the user grants When-In-Use
@@ -971,7 +1011,11 @@ final class AppModel: ObservableObject {
                 machineTotals: w.machineTotals,
                 laps: w.laps,
                 fuelRemindersFired: w.fuelRemindersFired,
-                fuelRemindersSeen: w.fuelRemindersSeen))
+                fuelRemindersSeen: w.fuelRemindersSeen,
+                guided: w.guided,
+                guidedStepIndex: w.guidedStepIndex,
+                guidedTestPower: w.guidedTestPower,
+                guidedFTPOffered: w.guidedFTPOffered))
     }
 
     /// If a manual workout was in flight when iOS killed the app, rebuild `activeWorkout` from the durable
@@ -998,6 +1042,10 @@ final class AppModel: ObservableObject {
         w.laps = snap.laps ?? []
         w.fuelRemindersFired = snap.fuelRemindersFired ?? 0
         w.fuelRemindersSeen = snap.fuelRemindersSeen ?? 0
+        w.guided = snap.guided
+        w.guidedStepIndex = snap.guidedStepIndex ?? -1
+        w.guidedTestPower = snap.guidedTestPower ?? GuidedTestPower()
+        w.guidedFTPOffered = snap.guidedFTPOffered ?? false
         activeWorkout = w
 
         // Rebuild the transient GPS lifecycle flag as well as the durable workout value. Without this,
@@ -1147,7 +1195,7 @@ final class AppModel: ObservableObject {
             // distance workout; the polyline itself is persisted alongside in RouteStore (the shared
             // WorkoutRow has no route column on Apple). Only a real route sets distance , honest ",".
             distanceM: route?.distanceM ?? machineSummary.distanceM.map(Double.init),
-            zonesJSON: nil, notes: nil, steps: nil)
+            zonesJSON: nil, notes: w.guided == .ftpTest ? String(localized: "FTP test") : nil, steps: nil)
         let machineRow: WorkoutMachineRow? = w.lastMachineReading.flatMap { reading in
             guard let data = try? JSONEncoder().encode(w.machineSamples),
                   let json = String(data: data, encoding: .utf8) else { return nil }
@@ -1222,7 +1270,10 @@ final class AppModel: ObservableObject {
         w.avgHr = Int((Double(w.samples.map(\.bpm).reduce(0, +)) / Double(w.samples.count)).rounded())
         w.liveStrain = StrainScorer.strain(w.samples, maxHR: Double(profile.hrMax),
                                               method: PuffinExperiment.effortMethod, sex: profile.sex) ?? 0
+        // Guided steps advance on time, so heart rate announces a step change even with the machine away.
+        let stepChanged = w.advanceGuided()
         activeWorkout = w
+        if stepChanged { buzz(loops: 2, gate: HapticPrefs.workout) }
         // Re-snapshot the durable session so a kill keeps the latest accumulated HR window (#529).
         persistActiveWorkout()
     }
@@ -1241,11 +1292,22 @@ final class AppModel: ObservableObject {
             return
         }
         w.machineName = live.machineName ?? w.machineName
+        w.recordGuidedPower(w.machineSamples.last?.powerW)
+        let stepChanged = w.advanceGuided()
         let fuelDue = w.lastMachineReading?.kind == .indoorBike
             && w.checkFuelReminder(intervalMin: BikeTrainingPrefs.fuelIntervalMin())
         activeWorkout = w
         persistActiveWorkout()
-        if fuelDue { buzz(loops: 2, gate: HapticPrefs.workout) }
+        if fuelDue || stepChanged { buzz(loops: 2, gate: HapticPrefs.workout) }
+    }
+
+    /// Records that the guided FTP result was offered (saved or declined), so it is not offered again.
+    func markGuidedFTPOffered() {
+        guard var w = activeWorkout, !w.guidedFTPOffered else { return }
+        foldPendingMachine(into: &w)
+        w.guidedFTPOffered = true
+        activeWorkout = w
+        persistActiveWorkout()
     }
 
     /// Dismisses the fuelling reminder banner on the bike layout.
