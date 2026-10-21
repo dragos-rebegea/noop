@@ -3,6 +3,7 @@ import StrandDesign
 import StrandAnalytics
 import StrandImport
 import WhoopStore
+import WhoopProtocol
 import Foundation
 #if canImport(MapKit)
 import MapKit
@@ -61,6 +62,9 @@ struct WorkoutDetailView: View {
     /// row's natural key. nil = no route was recorded (honest — the map only shows when points exist).
     @State private var route: [RouteMath.LatLng] = []
 
+    @State private var machine: WorkoutMachineRow?
+    @State private var machineSamples: [MachineSample] = []
+
     /// Drives the GPX/FIT export chooser for the recorded route.
     @State private var showRouteExport = false
 
@@ -85,6 +89,9 @@ struct WorkoutDetailView: View {
                        topBackground: liquidScaffoldSky()) {
             headerCard
             statStrip
+            machineStats
+            machinePowerChart
+            machineCadenceChart
             routeCard
             hrCurveCard
             zonesCard
@@ -113,6 +120,16 @@ struct WorkoutDetailView: View {
             let pts = RouteMath.decode(r.polyline)
             return pts.count >= 2 ? pts : []
         }()
+
+        var machineRow: WorkoutMachineRow?
+        if let store = await repo.storeHandle() {
+            machineRow = try? await store.workoutMachine(deviceId: Repository.whoopSource,
+                                                         startTs: row.startTs)
+        }
+        let decodedMachineSamples: [MachineSample] = machineRow.flatMap {
+            guard let data = $0.samplesJSON.data(using: .utf8) else { return nil }
+            return try? JSONDecoder().decode([MachineSample].self, from: data)
+        } ?? []
 
         // HR curve over the exact session window — a finer bucket than the 24h chart so a short run
         // still reads as a curve, not a handful of points.
@@ -159,6 +176,8 @@ struct WorkoutDetailView: View {
 
         await MainActor.run {
             self.route = routePoints
+            self.machine = machineRow
+            self.machineSamples = decodedMachineSamples
             self.hrPoints = points
             self.zoneMinutes = minutes
             self.zonesFromImport = fromImport
@@ -274,6 +293,120 @@ struct WorkoutDetailView: View {
                                                           : String(localized: "phone") },
                          accent: steps != nil ? StrandPalette.metricCyan : StrandPalette.textTertiary)
             }
+        }
+    }
+
+    // MARK: - FTMS companion
+
+    @ViewBuilder private var machineStats: some View {
+        if let machine {
+            VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+                SectionHeader("Machine data", overline: "FTMS companion", trailing: machine.machineName)
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: NoopMetrics.gap)],
+                          alignment: .leading, spacing: NoopMetrics.gap) {
+                    if let average = machine.avgPowerW {
+                        StatTile(label: "Avg power", value: grouped(average), caption: "W",
+                                 accent: StrandPalette.effortColor)
+                    }
+                    if let maximum = machine.maxPowerW {
+                        StatTile(label: "Max power", value: "\(maximum)", caption: "W",
+                                 accent: StrandPalette.effortColor)
+                    }
+                    if let cadence = machine.avgCadence {
+                        StatTile(label: "Avg cadence", value: cadenceNumber(cadence),
+                                 caption: machineCadenceUnit(machine.machineKind),
+                                 accent: StrandPalette.metricCyan)
+                    }
+                    if let distance = machine.distanceM, shouldShowMachineDistance(distance) {
+                        StatTile(label: "Machine distance",
+                                 value: distanceLabel(Double(distance)),
+                                 caption: String(localized: "reported by machine"),
+                                 accent: StrandPalette.metricCyan)
+                    }
+                    if let energy = machine.energyKcal {
+                        StatTile(label: "Machine calories", value: "\(energy)", caption: "kcal",
+                                 accent: StrandPalette.metricAmber)
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var machinePowerChart: some View {
+        let points = machineSamples.compactMap { sample -> TrendPoint? in
+            guard let power = sample.powerW, power >= 0 else { return nil }
+            return TrendPoint(date: Date(timeIntervalSince1970: TimeInterval(row.startTs + sample.t)),
+                              value: Double(power))
+        }
+        if points.count > 1 {
+            let values = points.map(\.value)
+            let high = max(1, values.max() ?? 1)
+            ChartCard(title: "Machine power",
+                      subtitle: String(localized: "Watts reported across the session"),
+                      trailing: machine?.avgPowerW.map { "\(String(localized: "Avg")) \(Int($0.rounded()))" },
+                      tint: StrandPalette.effortColor) {
+                TrendChart(points: points,
+                           gradient: StrandPalette.effortGradient,
+                           valueRange: 0...(high + max(10, high * 0.08)),
+                           showsArea: true,
+                           valueFormat: { "\(Int($0.rounded())) W" },
+                           dateFormat: { Self.tooltipTime.string(from: $0) },
+                           accessibilityLabel: String(localized: "Machine power during \(WorkoutSource.displaySport(row.sport))"),
+                           workoutTimeAxis: Date(timeIntervalSince1970: TimeInterval(row.startTs))...Date(timeIntervalSince1970: TimeInterval(row.endTs)))
+            } footer: {
+                ChartFooter([
+                    ("Avg", machine?.avgPowerW.map { "\(Int($0.rounded())) W" } ?? "-"),
+                    ("Peak", machine?.maxPowerW.map { "\($0) W" } ?? "-"),
+                ])
+            }
+        }
+    }
+
+    @ViewBuilder private var machineCadenceChart: some View {
+        let points = machineSamples.compactMap { sample -> TrendPoint? in
+            guard let cadence = sample.cadence, cadence >= 0 else { return nil }
+            return TrendPoint(date: Date(timeIntervalSince1970: TimeInterval(row.startTs + sample.t)),
+                              value: cadence)
+        }
+        if points.count > 1 {
+            let values = points.map(\.value)
+            let high = max(1, values.max() ?? 1)
+            ChartCard(title: "Machine cadence",
+                      subtitle: String(localized: "Cadence reported across the session"),
+                      trailing: machine?.avgCadence.map { "\(String(localized: "Avg")) \(cadenceNumber($0))" },
+                      tint: StrandPalette.metricCyan) {
+                TrendChart(points: points,
+                           gradient: Gradient(colors: [StrandPalette.metricCyan.opacity(0.35),
+                                                       StrandPalette.metricCyan]),
+                           valueRange: 0...(high + max(5, high * 0.08)),
+                           showsArea: true,
+                           valueFormat: { cadenceNumber($0) },
+                           dateFormat: { Self.tooltipTime.string(from: $0) },
+                           accessibilityLabel: String(localized: "Machine cadence during \(WorkoutSource.displaySport(row.sport))"),
+                           workoutTimeAxis: Date(timeIntervalSince1970: TimeInterval(row.startTs))...Date(timeIntervalSince1970: TimeInterval(row.endTs)))
+            } footer: {
+                ChartFooter([
+                    ("Avg", machine?.avgCadence.map { cadenceNumber($0) } ?? "-"),
+                    ("Peak", values.max().map { cadenceNumber($0) } ?? "-"),
+                ])
+            }
+        }
+    }
+
+    private func shouldShowMachineDistance(_ distance: Int) -> Bool {
+        guard let shown = row.distanceM else { return true }
+        return abs(shown - Double(distance)) > 0.5
+    }
+
+    private func cadenceNumber(_ cadence: Double) -> String {
+        cadence.rounded() == cadence ? String(Int(cadence)) : String(format: "%.1f", cadence)
+    }
+
+    private func machineCadenceUnit(_ rawKind: String) -> String {
+        switch FTMSMachineKind(rawValue: rawKind) {
+        case .some(.indoorBike): return String(localized: "rpm")
+        case .some(.rower): return String(localized: "spm")
+        case .some(.treadmill), .some(.crossTrainer), .none: return String(localized: "per min")
         }
     }
 

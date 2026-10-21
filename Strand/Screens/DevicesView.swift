@@ -159,6 +159,7 @@ private struct DevicesContent: View {
             // auto-collapses when one is forgotten. Reuses the existing active-strap confirmation.
             if activeDevices.count > 1 { strapSwitcher }
             ForEach(Array(activeDevices.enumerated()), id: \.element.id) { idx, device in
+                let isCompanion = model.ftmsCompanionDevice?.id == device.id
                 // Shared read-only probe gate (Test Centre → Connection + a live WHOOP), hoisted so the two
                 // probe closures below don't each re-inline a 4-term && chain — which tips the iOS Swift
                 // type-checker over its budget ("unable to type-check this expression in reasonable time").
@@ -176,6 +177,7 @@ private struct DevicesContent: View {
                     device: device,
                     isActive: device.status == .active,
                     isLiveConnected: device.status == .active && live.connected,
+                    isCompanion: isCompanion,
                     // #221: a WHOOP 5/MG can be BLE-connected yet have its ENCRYPTED bond refused (the
                     // WHOOP app, or a stale iOS pairing, holds the single-app bond) — no HR/biometric data
                     // flows even though the link is up, so "Active · Live" overstates it. pairingHint is
@@ -233,6 +235,9 @@ private struct DevicesContent: View {
                     onMakeActive: { switchTarget = device },
                     onRename: { renameDraft = device.nickname ?? device.displayName; renameTarget = device },
                     onRemove: { removeTarget = device },
+                    onToggleCompanion: device.sourceKind == .ftms && device.status != .active ? {
+                        model.setFTMSCompanion(isCompanion ? nil : device)
+                    } : nil,
                     // Restart is offered only for a live-connected WHOOP that is NOT a 4.0: the strap-log
                     // analysis on #275 showed no safe frame reboots a 4.0 (empty bodies are ignored; any
                     // non-empty body just wedges the BLE link for ~7s, sensor stays on), so a 4.0 Restart
@@ -619,6 +624,7 @@ private struct DevicesContent: View {
     /// so the dialog's choices come from the still-paired devices.
     private func confirmRemove(_ device: PairedDevice) {
         let wasActive = device.status == .active
+        model.clearFTMSCompanionIfMatches(device.id)
         // #78: actually RELEASE the BLE link, not just archive the registry row — otherwise NOOP keeps
         // re-grabbing the strap (reconnect timer + targeted-connect pin + iOS state restoration), holding
         // it connected so it can never enter pairing mode to be re-paired.
@@ -735,6 +741,7 @@ private struct DeviceCard: View {
     let device: PairedDevice
     let isActive: Bool
     let isLiveConnected: Bool
+    var isCompanion: Bool = false
     /// #221: the active+connected strap is BLE-linked but its encrypted bond was refused (#78 state) —
     /// no HR/biometric data flows despite the link being up. Drives the "Connected · not paired" pill
     /// (which takes priority over "Active · Live") and the honest subtitle/footnote. False for every
@@ -771,6 +778,7 @@ private struct DeviceCard: View {
     var onMakeActive: () -> Void
     var onRename: () -> Void
     var onRemove: (() -> Void)?
+    var onToggleCompanion: (() -> Void)? = nil
     /// Restart the strap (WHOOP-only, connected-only; confirmation-gated by the parent). nil for a
     /// non-WHOOP source or a device that isn't the live-connected one. (#166)
     var onReboot: (() -> Void)? = nil
@@ -820,6 +828,9 @@ private struct DeviceCard: View {
                     // Locally-adopted Oura is Beta: a non-dot Beta chip sits beside the usual state pill.
                     if device.sourceKind == .oura {
                         StatePill("Beta", tone: .warning, showsDot: false)
+                    }
+                    if isCompanion {
+                        StatePill("Companion", tone: .positive, showsDot: false)
                     }
                     statePill
                 }
@@ -1040,6 +1051,12 @@ private struct DeviceCard: View {
                     Button { onMakeActive() } label: { Label("Make active", systemImage: "bolt.fill") }
                 }
                 Button { onRename() } label: { Label("Rename", systemImage: "pencil") }
+                if let onToggleCompanion {
+                    Button { onToggleCompanion() } label: {
+                        Label(isCompanion ? "Stop using alongside WHOOP" : "Use alongside WHOOP",
+                              systemImage: isCompanion ? "link.badge.minus" : "link.badge.plus")
+                    }
+                }
                 // Restart the strap — only for the live-connected WHOOP (the reboot travels over the active
                 // BLE link). Confirmation-gated by the parent. (#166)
                 if isLiveConnected, SourceCoordinator.isWhoop(device), let onReboot {

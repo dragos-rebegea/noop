@@ -163,7 +163,7 @@ struct AddDeviceWizard: View {
         }
         _hrScanner = StateObject(wrappedValue: StandardHRSource(
             live: live, deviceId: "scan-preview", persist: { _ in }, log: wizardLog))
-        _ftmsScanner = StateObject(wrappedValue: FTMSSource(live: live, log: wizardLog, feedsLive: false))
+        _ftmsScanner = StateObject(wrappedValue: FTMSSource(live: live, log: wizardLog, role: .scanPreview))
         _huamiScanner = StateObject(wrappedValue: HuamiHRSource(
             live: live, deviceId: "scan-preview", log: wizardLog, feedsLive: false))
         // Discovery-only Oura source: gen defaults to gen3 for the scan-preview command clamp (the real
@@ -210,9 +210,16 @@ struct AddDeviceWizard: View {
         .alert("Make this your active device?",
                isPresented: $askMakeActive) {
             Button("Not now", role: .cancel) { finishAdd(makeActive: false) }
+            if type == .gymEquipment {
+                Button("Use alongside WHOOP") { finishAdd(makeActive: false, makeCompanion: true) }
+            }
             Button("Make active") { finishAdd(makeActive: true) }
         } message: {
-            Text("Make \(confirmName) your active device now? It will provide your live data. You can change this any time.")
+            if type == .gymEquipment {
+                Text("Make \(confirmName) active, use it alongside WHOOP during workouts, or keep it paired for later.")
+            } else {
+                Text("Make \(confirmName) your active device now? It will provide your live data. You can change this any time.")
+            }
         }
         // The SECOND irreversible gate (after the consent tick): the destructive "Take over this ring?"
         // confirm. Tapping Take over grants adopt consent + registers the ring active (the live source then
@@ -1248,7 +1255,7 @@ struct AddDeviceWizard: View {
     }
 
     /// Build the right `PairedDevice` for the chosen path, register it, optionally activate, then close.
-    private func finishAdd(makeActive: Bool) {
+    private func finishAdd(makeActive: Bool, makeCompanion: Bool = false) {
         stopAllScans()
         let now = Int(Date().timeIntervalSince1970)
         let name = confirmName
@@ -1317,7 +1324,7 @@ struct AddDeviceWizard: View {
             onClose(); return
         }
 
-        model.registerDevice(device, makeActive: makeActive)
+        model.registerDevice(device, makeActive: makeActive, makeCompanion: makeCompanion)
         onClose()
     }
 

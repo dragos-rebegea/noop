@@ -25,6 +25,12 @@ public final class FTMSSource: NSObject, ObservableObject {
 
     // MARK: - Public model
 
+    public enum Role: Equatable, Sendable {
+        case activeDevice
+        case companion
+        case scanPreview
+    }
+
     /// An FTMS machine seen during a scan.
     public struct DiscoveredMachine: Identifiable, Equatable {
         public let id: UUID
@@ -66,9 +72,8 @@ public final class FTMSSource: NSObject, ObservableObject {
     private let live: LiveState
     private let log: (String) -> Void
     private let onBattery: (Int) -> Void
-    /// Whether to push the machine's HR into the shared `LiveState` (true for the active machine; false
-    /// for the throwaway discovery-only scanner the wizard uses).
-    private let feedsLive: Bool
+    private let role: Role
+    private let preferredName: String?
 
     private var loggedFirstReading = false
 
@@ -78,6 +83,10 @@ public final class FTMSSource: NSObject, ObservableObject {
     private var peripheral: CBPeripheral?
     private var pendingConnectID: UUID?
     private var seenPeripherals: [UUID: CBPeripheral] = [:]
+    private var reconnectTask: Task<Void, Never>?
+    private var reconnectAttempt = 0
+    private var intentionallyStopped = false
+    private static let maximumReconnectAttempts = 5
 
     // MARK: - Init
 
@@ -85,15 +94,18 @@ public final class FTMSSource: NSObject, ObservableObject {
     ///   - live: the shared `LiveState` the Live UI + live-workout recorder observe.
     ///   - log: connect-lifecycle diagnostics, wired to the same strap log `BLEManager` writes to.
     ///   - onBattery: fired with the machine's battery percent (0–100) when read off 0x2A19.
-    ///   - feedsLive: when false (the wizard's discovery-only scanner) the source never writes `LiveState`.
+    ///   - role: controls which live-state surface receives decoded readings.
+    ///   - preferredName: registry name shown while a companion is connecting.
     public init(live: LiveState,
                 log: @escaping (String) -> Void = { _ in },
                 onBattery: @escaping (Int) -> Void = { _ in },
-                feedsLive: Bool = true) {
+                role: Role = .activeDevice,
+                preferredName: String? = nil) {
         self.live = live
         self.log = log
         self.onBattery = onBattery
-        self.feedsLive = feedsLive
+        self.role = role
+        self.preferredName = preferredName
         super.init()
         self.central = CBCentralManager(delegate: self, queue: nil)
     }
@@ -124,7 +136,13 @@ public final class FTMSSource: NSObject, ObservableObject {
 
     /// Connect to the chosen machine and start streaming its machine data.
     public func connect(_ id: UUID) {
+        intentionallyStopped = false
         stopScan()
+        if role == .companion {
+            live.machineState = .connecting
+            live.machineName = preferredName ?? live.machineName
+            live.machineReading = nil
+        }
         // Before the radio is up a retrieve answers nothing even for a machine this device has been bonded
         // to for weeks, and the branch below would read that as "never seen" and arm a scan (#2433).
         // Park the intent instead: `centralManagerDidUpdateState` asks again once the answer means
@@ -144,12 +162,19 @@ public final class FTMSSource: NSObject, ObservableObject {
         seenPeripherals[id] = p
         peripheral = p
         p.delegate = self
+        if role == .companion {
+            live.machineName = preferredName ?? p.name ?? live.machineName
+        }
         log("FTMS: connecting to \(id)")
         central.connect(p, options: nil)
     }
 
     /// Tear down: cancel the connection and stop scanning. Idempotent.
     public func stop() {
+        intentionallyStopped = true
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        reconnectAttempt = 0
         stopScan()
         pendingConnectID = nil
         if let p = peripheral {
@@ -159,7 +184,14 @@ public final class FTMSSource: NSObject, ObservableObject {
         loggedFirstReading = false
         latest = nil
         batteryPct = nil
-        if feedsLive { live.connected = false }
+        switch role {
+        case .activeDevice:
+            live.connected = false
+        case .companion:
+            live.clearMachine()
+        case .scanPreview:
+            break
+        }
     }
 
     // MARK: - Reading handling
@@ -169,11 +201,47 @@ public final class FTMSSource: NSObject, ObservableObject {
     /// recorder scores it — no new scoring loop.
     private func ingest(_ reading: FTMSReading) {
         latest = reading
-        guard feedsLive else { return }
-        if let hr = reading.heartRate, hr >= 30, hr <= 220 {
-            live.heartRate = hr
+        switch role {
+        case .activeDevice:
+            if let hr = reading.heartRate, hr >= 30, hr <= 220 {
+                live.heartRate = hr
+            }
+            live.connected = true
+        case .companion:
+            reconnectAttempt = 0
+            live.machineState = .live
+            live.machineReading = reading
+        case .scanPreview:
+            break
         }
-        live.connected = true
+    }
+
+    private func markDisconnected() {
+        latest = nil
+        switch role {
+        case .activeDevice:
+            live.connected = false
+        case .companion:
+            live.machineState = .disconnected
+            live.machineReading = nil
+        case .scanPreview:
+            break
+        }
+    }
+
+    private func scheduleCompanionReconnect(to id: UUID) {
+        guard role == .companion, !intentionallyStopped,
+              reconnectAttempt < Self.maximumReconnectAttempts else { return }
+        reconnectTask?.cancel()
+        let delaySeconds = 1 << reconnectAttempt
+        reconnectAttempt += 1
+        log("FTMS: companion reconnect \(reconnectAttempt)/\(Self.maximumReconnectAttempts) in \(delaySeconds)s")
+        reconnectTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delaySeconds) * 1_000_000_000)
+            guard !Task.isCancelled, let self, !self.intentionallyStopped else { return }
+            self.live.machineState = .connecting
+            self.connect(id)
+        }
     }
 }
 
@@ -219,7 +287,7 @@ extension FTMSSource: @preconcurrency CBCentralManagerDelegate {
                 break
             }
         default:
-            if feedsLive { live.connected = false }
+            markDisconnected()
         }
     }
 
@@ -232,6 +300,7 @@ extension FTMSSource: @preconcurrency CBCentralManagerDelegate {
         seenPeripherals[id] = peripheral
         let advName = advertisementData[CBAdvertisementDataLocalNameKey] as? String
         let name = advName ?? peripheral.name ?? "Gym Equipment"
+        if role == .companion { live.machineName = preferredName ?? name }
         if firstSight { log("FTMS: found \(LiveState.logSafeDeviceName(name)) (\(id)) rssi \(RSSI.intValue)") }
         let machine = DiscoveredMachine(id: id, name: name, rssi: RSSI.intValue)
         if let idx = discovered.firstIndex(where: { $0.id == id }) {
@@ -246,6 +315,12 @@ extension FTMSSource: @preconcurrency CBCentralManagerDelegate {
     }
 
     public func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        if role == .companion {
+            live.machineState = .connecting
+            live.machineName = preferredName ?? peripheral.name ?? live.machineName
+        }
         log("FTMS: connected — discovering services")
         peripheral.delegate = self
         peripheral.discoverServices([Self.fitnessMachineService, Self.batteryService])
@@ -254,7 +329,8 @@ extension FTMSSource: @preconcurrency CBCentralManagerDelegate {
     public func centralManager(_ central: CBCentralManager,
                                didFailToConnect peripheral: CBPeripheral, error: Error?) {
         log("FTMS: WARNING failed to connect — \(error?.localizedDescription ?? "unknown error")")
-        if feedsLive { live.connected = false }
+        markDisconnected()
+        scheduleCompanionReconnect(to: peripheral.identifier)
     }
 
     public func centralManager(_ central: CBCentralManager,
@@ -265,10 +341,10 @@ extension FTMSSource: @preconcurrency CBCentralManagerDelegate {
             log("FTMS: disconnected (clean)")
         }
         loggedFirstReading = false
-        latest = nil
         batteryPct = nil
-        if feedsLive { live.connected = false }
+        markDisconnected()
         if self.peripheral?.identifier == peripheral.identifier { self.peripheral = nil }
+        scheduleCompanionReconnect(to: peripheral.identifier)
     }
 }
 

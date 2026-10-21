@@ -5,6 +5,13 @@ import WhoopProtocol
 import WhoopStore
 import OuraProtocol
 
+public enum MachineLinkState: Equatable, Sendable {
+    case off
+    case connecting
+    case live
+    case disconnected
+}
+
 /// Observable snapshot of the live connection + biometric state, driven by FrameRouter
 /// (from decoded frames) and BLEManager (from CoreBluetooth callbacks).
 /// `@MainActor` so SwiftUI views observe it safely; mutators are called on the main queue.
@@ -169,6 +176,19 @@ public final class LiveState: ObservableObject {
     /// Not cleared by [clearBiometrics]: which device is active is not a biometric and does not stop
     /// being true when a link drops. (#2208)
     @Published public var activeIsWhoop: Bool = true
+
+    /// Connection state for the workout-only FTMS companion slot.
+    @Published public var machineState: MachineLinkState = .off
+    /// User-facing name of the FTMS companion used by the current workout.
+    @Published public var machineName: String? = nil
+    /// Latest FTMS companion reading. Cleared whenever its link stops or disconnects.
+    @Published public var machineReading: FTMSReading? = nil
+
+    public func clearMachine() {
+        machineState = .off
+        machineName = nil
+        machineReading = nil
+    }
 
     // MARK: - Battery runtime estimate (#713)
 

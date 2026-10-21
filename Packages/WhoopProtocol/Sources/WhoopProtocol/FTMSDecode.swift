@@ -55,7 +55,7 @@ public enum FTMSMachineKind: String, Sendable, Equatable, Codable {
 /// raw fixed-point), so the UI shows honest values and never has to know the per-field scale.
 ///
 /// `kind` records which characteristic produced it (so the UI can label the session).
-public struct FTMSReading: Equatable, Sendable {
+public struct FTMSReading: Equatable, Sendable, Codable {
     public let kind: FTMSMachineKind
     /// Instantaneous speed in km/h. (Treadmill/cross-trainer/indoor-bike report this; rower does not.)
     public var speedKmh: Double?

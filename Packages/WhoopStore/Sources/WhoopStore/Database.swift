@@ -1139,6 +1139,24 @@ extension WhoopStore {
                 t.column("updatedAt", .integer).notNull() // unix seconds
             }
         }
+        // v49: FTMS companion metrics saved beside a workout. Samples remain compact JSON because
+        // they are read as one workout-scoped series, while summary columns support direct display.
+        migrator.registerMigration("v49-workout-machine") { db in
+            try db.create(table: "workoutMachine", options: [.ifNotExists]) { t in
+                t.column("deviceId", .text).notNull()
+                t.column("startTs", .integer).notNull()
+                t.column("machineKind", .text).notNull()
+                t.column("machineName", .text)
+                t.column("avgPowerW", .double)
+                t.column("maxPowerW", .integer)
+                t.column("avgCadence", .double)
+                t.column("distanceM", .integer)
+                t.column("energyKcal", .integer)
+                t.column("elapsedS", .integer)
+                t.column("samplesJSON", .text).notNull()
+                t.primaryKey(["deviceId", "startTs"])
+            }
+        }
         return migrator
     }
 }

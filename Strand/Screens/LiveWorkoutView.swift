@@ -2,6 +2,7 @@ import SwiftUI
 import StrandDesign
 import StrandAnalytics
 import WhoopStore
+import WhoopProtocol
 
 /// Live workout mode (#238) — the in-exercise screen: a big live heart rate, the current HR zone,
 /// elapsed time, and live effort building, all from the SAME live feed and scorers the rest of the
@@ -64,6 +65,7 @@ struct LiveWorkoutView: View {
                 // standard fitness sensor is feeding metrics, refreshing on its own packets without
                 // re-rendering the HR hero / effort gauge above (scroll-stutter isolation).
                 SensorRowIfPresent()
+                MachineRowIfPresent()
             }
             .screenPadding()
             .padding(.vertical, NoopMetrics.space6)
@@ -537,6 +539,121 @@ private struct SensorRowIfPresent: View {
                 .lineLimit(1).minimumScaleFactor(0.6)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// Live FTMS companion status and metrics. This leaf owns its LiveState observation so machine
+/// notifications do not invalidate the workout hero or heart-rate charts above it.
+private struct MachineRowIfPresent: View {
+    @EnvironmentObject private var live: LiveState
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
+    @AppStorage(UnitPrefs.distanceSystemKey) private var distanceSystemRaw = ""
+
+    private var distanceUnitSystem: UnitSystem {
+        UnitPrefs.resolveDistance(
+            system: UnitSystem(rawValue: unitSystemRaw) ?? .metric,
+            override: distanceSystemRaw)
+    }
+
+    var body: some View {
+        switch live.machineState {
+        case .off:
+            EmptyView()
+        case .connecting:
+            let name = live.machineName ?? String(localized: "gym equipment")
+            statusCard(text: String(localized: "Connecting to \(name)..."),
+                       showsProgress: true)
+                .staggeredAppear(index: 8)
+        case .disconnected:
+            let name = live.machineName ?? String(localized: "Gym equipment")
+            statusCard(text: String(localized: "\(name) disconnected"),
+                       showsProgress: false)
+                .staggeredAppear(index: 8)
+        case .live:
+            if let reading = live.machineReading {
+                metricCard(reading)
+                    .staggeredAppear(index: 8)
+            }
+        }
+    }
+
+    private func statusCard(text: String, showsProgress: Bool) -> some View {
+        NoopCard(padding: NoopMetrics.cardInnerPadding, tint: StrandPalette.effortColor) {
+            HStack(spacing: NoopMetrics.space3) {
+                if showsProgress {
+                    ProgressView()
+                        .tint(StrandPalette.effortColor)
+                }
+                Text(text)
+                    .font(StrandFont.subhead)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    private func metricCard(_ reading: FTMSReading) -> some View {
+        NoopCard(padding: NoopMetrics.cardInnerPadding, tint: StrandPalette.effortColor) {
+            VStack(alignment: .leading, spacing: NoopMetrics.space3) {
+                Text(live.machineName ?? reading.kind.displayName)
+                    .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: NoopMetrics.gap)],
+                          alignment: .leading, spacing: NoopMetrics.gap) {
+                    if let power = reading.powerWatts, power >= 0 {
+                        stat(String(localized: "POWER"), "\(power) W")
+                    }
+                    if let cadence = reading.cadence {
+                        stat(String(localized: "CADENCE"), cadenceLabel(cadence, kind: reading.kind))
+                    }
+                    if let speed = UnitFormatter.speedFromKilometersPerHour(
+                        reading.speedKmh, system: distanceUnitSystem) {
+                        stat(String(localized: "SPEED"), speed)
+                    }
+                    if let distance = reading.distanceM {
+                        stat(String(localized: "Distance").uppercased(), UnitFormatter.distanceFromMeters(
+                            Double(distance), system: distanceUnitSystem))
+                    }
+                    if let energy = reading.totalEnergyKcal {
+                        stat(String(localized: "Machine calories").uppercased(), "\(energy) kcal")
+                    }
+                    if let elapsed = reading.elapsedTimeSec {
+                        stat(String(localized: "Machine time").uppercased(), elapsedLabel(elapsed))
+                    }
+                }
+            }
+        }
+    }
+
+    private func stat(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.space1) {
+            Text(title)
+                .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
+                .foregroundStyle(StrandPalette.textSecondary)
+            Text(value)
+                .font(StrandFont.number(24))
+                .foregroundStyle(StrandPalette.effortColor)
+                .lineLimit(1).minimumScaleFactor(0.6)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func cadenceLabel(_ cadence: Double, kind: FTMSMachineKind) -> String {
+        let value = cadence.rounded() == cadence ? String(Int(cadence)) : String(format: "%.1f", cadence)
+        switch kind {
+        case .indoorBike: return "\(value) rpm"
+        case .rower: return "\(value) spm"
+        case .treadmill, .crossTrainer: return "\(value) /min"
+        }
+    }
+
+    private func elapsedLabel(_ seconds: Int) -> String {
+        let hours = seconds / 3600
+        let minutes = (seconds % 3600) / 60
+        let remainder = seconds % 60
+        return hours > 0
+            ? String(format: "%d:%02d:%02d", hours, minutes, remainder)
+            : String(format: "%d:%02d", minutes, remainder)
     }
 }
 

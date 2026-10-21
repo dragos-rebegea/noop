@@ -10,14 +10,27 @@ import StrandDesign
 /// Public entry used by Live / Workouts. Keeps the prior `onStart` + optional title overrides so the
 /// merge-name prompt can reuse the same browser.
 struct StartWorkoutSheet: View {
-    let onStart: (_ sport: String) -> Void
+    let onStart: (_ sport: String, _ useCompanion: Bool) -> Void
+    private let companionName: String?
     private let heading: String
     private let explainer: String
     private let actionVerb: String
 
     init(title: String? = nil, subtitle: String? = nil, actionVerb: String? = nil,
          onStart: @escaping (_ sport: String) -> Void) {
+        self.onStart = { sport, _ in onStart(sport) }
+        self.companionName = nil
+        self.heading = title ?? String(localized: "Choose a workout")
+        self.explainer = subtitle
+            ?? String(localized: "Pick an activity to begin recording heart rate, effort, peak, and average.")
+        self.actionVerb = actionVerb ?? String(localized: "Start")
+    }
+
+    init(title: String? = nil, subtitle: String? = nil, actionVerb: String? = nil,
+         companionName: String?,
+         onStart: @escaping (_ sport: String, _ useCompanion: Bool) -> Void) {
         self.onStart = onStart
+        self.companionName = companionName
         self.heading = title ?? String(localized: "Choose a workout")
         self.explainer = subtitle
             ?? String(localized: "Pick an activity to begin recording heart rate, effort, peak, and average.")
@@ -26,7 +39,7 @@ struct StartWorkoutSheet: View {
 
     var body: some View {
         WorkoutSelectionScreen(heading: heading, explainer: explainer, actionVerb: actionVerb,
-                               onStart: onStart)
+                               companionName: companionName, onStart: onStart)
     }
 }
 
@@ -36,10 +49,13 @@ struct WorkoutSelectionScreen: View {
     let heading: String
     let explainer: String
     let actionVerb: String
-    let onStart: (_ sport: String) -> Void
+    let companionName: String?
+    let onStart: (_ sport: String, _ useCompanion: Bool) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
+    @State private var selectedSport: WorkoutCatalog.Sport?
+    @State private var useCompanion = false
     @FocusState private var searchFocused: Bool
 
     private var trimmedQuery: String { query.trimmingCharacters(in: .whitespaces) }
@@ -53,22 +69,26 @@ struct WorkoutSelectionScreen: View {
         NavigationStack {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: NoopMetrics.space5) {
-                    headerCopy
-                    WorkoutSearchField(query: $query, isFocused: $searchFocused)
-                        .padding(.top, NoopMetrics.space1)
-
-                    if showRecent {
-                        recentSection
-                    }
-
-                    if filtered.isEmpty {
-                        emptyResults
-                            .padding(.top, NoopMetrics.space8)
+                    if let selectedSport, let companionName {
+                        companionConfirmation(sport: selectedSport, companionName: companionName)
                     } else {
-                        LazyVStack(spacing: NoopMetrics.space4) {
-                            ForEach(filtered) { sport in
-                                WorkoutSelectionCard(sport: sport, actionVerb: actionVerb) {
-                                    select(sport.name)
+                        headerCopy
+                        WorkoutSearchField(query: $query, isFocused: $searchFocused)
+                            .padding(.top, NoopMetrics.space1)
+
+                        if showRecent {
+                            recentSection
+                        }
+
+                        if filtered.isEmpty {
+                            emptyResults
+                                .padding(.top, NoopMetrics.space8)
+                        } else {
+                            LazyVStack(spacing: NoopMetrics.space4) {
+                                ForEach(filtered) { sport in
+                                    WorkoutSelectionCard(sport: sport, actionVerb: actionVerb) {
+                                        select(sport)
+                                    }
                                 }
                             }
                         }
@@ -129,7 +149,7 @@ struct WorkoutSelectionScreen: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: NoopMetrics.space2) {
                     ForEach(recentSports) { sport in
-                        RecentWorkoutChip(sport: sport) { select(sport.name) }
+                        RecentWorkoutChip(sport: sport) { select(sport) }
                     }
                 }
             }
@@ -153,11 +173,69 @@ struct WorkoutSelectionScreen: View {
         .accessibilityElement(children: .combine)
     }
 
-    private func select(_ name: String) {
+    private func select(_ sport: WorkoutCatalog.Sport) {
         searchFocused = false
-        RecentSportsPrefs.recordSelection(name)
-        onStart(name)
+        guard companionName != nil else {
+            begin(sport, useCompanion: false)
+            return
+        }
+        useCompanion = WorkoutCompanionPrefs.useCompanion(for: sport)
+        selectedSport = sport
+    }
+
+    private func begin(_ sport: WorkoutCatalog.Sport, useCompanion: Bool) {
+        RecentSportsPrefs.recordSelection(sport.name)
+        WorkoutCompanionPrefs.set(useCompanion, for: sport)
+        onStart(sport.name, useCompanion)
         dismiss()
+    }
+
+    private func companionConfirmation(sport: WorkoutCatalog.Sport,
+                                       companionName: String) -> some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.space5) {
+            Text(sport.name)
+                .font(StrandFont.rounded(34, weight: .bold))
+                .foregroundStyle(StrandPalette.textPrimary)
+
+            StrandCard {
+                Toggle(isOn: $useCompanion) {
+                    VStack(alignment: .leading, spacing: NoopMetrics.space1) {
+                        Text("Use \(companionName)")
+                            .font(StrandFont.headline)
+                            .foregroundStyle(StrandPalette.textPrimary)
+                        Text("Connect this machine for power, cadence, speed, distance, and machine calories.")
+                            .font(StrandFont.footnote)
+                            .foregroundStyle(StrandPalette.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .tint(StrandPalette.accent)
+            }
+
+            NoopButton(LocalizedStringKey(actionVerb), systemImage: "play.fill", kind: .primary, fullWidth: true) {
+                begin(sport, useCompanion: useCompanion)
+            }
+            NoopButton("Choose another workout", systemImage: "chevron.left", kind: .secondary,
+                       fullWidth: true) {
+                selectedSport = nil
+            }
+        }
+    }
+}
+
+enum WorkoutCompanionPrefs {
+    private static let prefix = "ftms.useCompanion."
+
+    static func useCompanion(for sport: WorkoutCatalog.Sport,
+                             defaults: UserDefaults = .standard) -> Bool {
+        let key = prefix + sport.name
+        guard defaults.object(forKey: key) != nil else { return !sport.isDistanceSport }
+        return defaults.bool(forKey: key)
+    }
+
+    static func set(_ enabled: Bool, for sport: WorkoutCatalog.Sport,
+                    defaults: UserDefaults = .standard) {
+        defaults.set(enabled, forKey: prefix + sport.name)
     }
 }
 

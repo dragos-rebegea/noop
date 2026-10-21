@@ -52,4 +52,19 @@ final class WorkoutSampleOncePerSecondTests: XCTestCase {
         XCTAssertEqual(effort(workout.samples), effort(clean))
         XCTAssertGreaterThan(effort(everyArrival), effort(clean))
     }
+
+    func testMachineReadingsKeepOneMergedSamplePerElapsedSecond() {
+        var workout = AppModel.ActiveWorkout(start: Date(timeIntervalSince1970: 5_000))
+        XCTAssertTrue(workout.recordMachineReading(
+            FTMSReading(kind: .indoorBike, powerWatts: 210), elapsedSecond: 3))
+        XCTAssertTrue(workout.recordMachineReading(
+            FTMSReading(kind: .indoorBike, cadence: 84), elapsedSecond: 3))
+        XCTAssertTrue(workout.recordMachineReading(
+            FTMSReading(kind: .indoorBike, cadence: 86, powerWatts: 230), elapsedSecond: 4))
+
+        XCTAssertEqual(workout.machineSamples, [
+            MachineSample(t: 3, powerW: 210, cadence: 84),
+            MachineSample(t: 4, powerW: 230, cadence: 86),
+        ])
+    }
 }

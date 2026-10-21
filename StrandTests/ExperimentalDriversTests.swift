@@ -172,4 +172,47 @@ final class ExperimentalDriversTests: XCTestCase {
         XCTAssertFalse(strapLogLines.contains(where: { $0.hasPrefix("HR-strap:") }),
                        "No StandardHRSource should be started for a HealthKit pseudo-device")
     }
+
+    @MainActor
+    func testCompanionStartAndStopNeverStopWhoop() async throws {
+        final class StubSource: LiveHRSource {
+            var connectCalls = 0
+            var stopCalls = 0
+            func scan() { connectCalls += 1 }
+            func connect(_ id: UUID) { connectCalls += 1 }
+            func stop() { stopCalls += 1 }
+        }
+
+        let store = try await WhoopStore.inMemory()
+        let registry = DeviceRegistry(store: DeviceRegistryStore(dbQueue: store.registryWriter))
+        registry.reload()
+        let companionId = "ftms-" + UUID().uuidString
+        registry.add(PairedDevice(
+            id: companionId, brand: "Gym", model: "Bike", peripheralId: UUID().uuidString,
+            sourceKind: .ftms, capabilities: [.hr], status: .paired, addedAt: 0, lastSeenAt: 0))
+        let suiteName = "SourceCoordinatorCompanionTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let stub = StubSource()
+        var stopWhoopCalls = 0
+        let coordinator = SourceCoordinator(
+            registry: registry,
+            live: LiveState(),
+            storeHandle: { nil },
+            startWhoop: {},
+            stopWhoop: { stopWhoopCalls += 1 },
+            setWhoopPreferredPeripheral: { _ in },
+            setWhoopActiveDeviceId: { _ in },
+            connectedPeripheralUUID: Empty<String?, Never>().eraseToAnyPublisher(),
+            defaults: defaults,
+            makeCompanionSource: { _, _ in stub })
+
+        coordinator.setCompanionDevice(companionId)
+        coordinator.startCompanion()
+        coordinator.stopCompanion()
+
+        XCTAssertEqual(stub.connectCalls, 1)
+        XCTAssertEqual(stub.stopCalls, 1)
+        XCTAssertEqual(stopWhoopCalls, 0)
+    }
 }

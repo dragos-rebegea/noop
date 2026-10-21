@@ -18,11 +18,17 @@ final class ActiveWorkoutPersistenceTests: XCTestCase {
         peakHr: Int = 145,
         liveStrain: Double = 8.4,
         pausedAtSec: Int? = nil,
-        pausedDurationSec: Int? = nil
+        pausedDurationSec: Int? = nil,
+        usesCompanion: Bool? = false,
+        machineSamples: [MachineSample]? = [],
+        lastMachineReading: FTMSReading? = nil,
+        machineName: String? = nil
     ) -> ActiveWorkoutPersistence.Snapshot {
         ActiveWorkoutPersistence.Snapshot(startSec: startSec, sport: sport, samples: samples,
                                           avgHr: avgHr, peakHr: peakHr, liveStrain: liveStrain,
-                                          pausedAtSec: pausedAtSec, pausedDurationSec: pausedDurationSec)
+                                          pausedAtSec: pausedAtSec, pausedDurationSec: pausedDurationSec,
+                                          usesCompanion: usesCompanion, machineSamples: machineSamples,
+                                          lastMachineReading: lastMachineReading, machineName: machineName)
     }
 
     /// A throwaway, isolated defaults suite so the test never touches the real store.
@@ -56,6 +62,21 @@ final class ActiveWorkoutPersistenceTests: XCTestCase {
         let decoded = ActiveWorkoutPersistence.decode(
             ActiveWorkoutPersistence.encode(snapshot(sport: "Traditional Strength Training")))
         XCTAssertEqual(decoded!.sport, "Traditional Strength Training")
+    }
+
+    func testMachineCompanionFieldsRoundTrip() {
+        let reading = FTMSReading(kind: .indoorBike, cadence: 88, powerWatts: 240,
+                                  distanceM: 5_000, totalEnergyKcal: 120, elapsedTimeSec: 900)
+        let original = snapshot(
+            usesCompanion: true,
+            machineSamples: [MachineSample(t: 0, powerW: 200, cadence: 82),
+                             MachineSample(t: 1, powerW: 240, cadence: 88)],
+            lastMachineReading: reading,
+            machineName: "Bike")
+
+        let decoded = ActiveWorkoutPersistence.decode(ActiveWorkoutPersistence.encode(original))
+
+        XCTAssertEqual(decoded, original)
     }
 
     // MARK: - UserDefaults store / load / clear

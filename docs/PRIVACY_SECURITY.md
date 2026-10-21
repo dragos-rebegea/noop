@@ -38,6 +38,7 @@ The main local data paths are:
 | Path | Transport | Direction |
 |------|-----------|-----------|
 | Live collection | Bluetooth LE, strap → device | Read-only from the strap |
+| FTMS workout companion | Bluetooth LE, gym machine to device | Read-only machine-data notifications; no Control Point writes |
 | File import (Apple Health, WHOOP CSV, nutrition CSV) | User-selected files on disk | Read-only from disk |
 | Apple Health export, incl. iOS "Export for Shortcuts" | On-device, user-initiated | NOOP → your Apple Health, on your device only (§1.3) |
 
@@ -319,8 +320,9 @@ It holds exactly the kinds of data you would expect from the features:
 
 - **Decoded biometric streams** (durable): `hrSample`, `rrInterval`, `spo2Sample`,
   `skinTempSample`, `respSample`, `gravitySample`, `battery`, `event`.
-- **Derived/cached metrics**: `sleepSession`, `dailyMetric`, `workout`, `journal`,
-  `appleDaily`, and the generic long-format `metricSeries`.
+- **Derived/cached metrics**: `sleepSession`, `dailyMetric`, `workout`, `workoutMachine`, `journal`,
+  `appleDaily`, and the generic long-format `metricSeries`. `workoutMachine` keeps the local FTMS
+  summary and power/cadence sample series for a recorded workout.
 - **Your own entries and imports**: daily **mood check-ins** (the Mind feature) and imported
   **nutrition** figures (from a Cronometer / MacroFactor CSV) are stored the same way — locally, in
   this database, never transmitted. They are self-tracking notes, not clinical records (see

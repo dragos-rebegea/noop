@@ -186,6 +186,13 @@ extension WhoopStore {
     public func deleteWorkouts(deviceId: String, sport: String, from: Int, to: Int) async throws -> Int {
         try syncWrite { db in
             try db.execute(sql: """
+                DELETE FROM workoutMachine
+                WHERE deviceId = ? AND startTs IN (
+                    SELECT startTs FROM workout
+                    WHERE deviceId = ? AND sport = ? AND startTs >= ? AND startTs <= ?
+                )
+                """, arguments: [deviceId, deviceId, sport, from, to])
+            try db.execute(sql: """
                 DELETE FROM workout
                 WHERE deviceId = ? AND sport = ? AND startTs >= ? AND startTs <= ?
                 """, arguments: [deviceId, sport, from, to])

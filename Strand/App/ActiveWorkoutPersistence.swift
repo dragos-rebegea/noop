@@ -30,6 +30,10 @@ enum ActiveWorkoutPersistence {
         var liveStrain: Double
         var pausedAtSec: Int? = nil
         var pausedDurationSec: Int? = nil
+        var usesCompanion: Bool? = false
+        var machineSamples: [MachineSample]? = []
+        var lastMachineReading: FTMSReading? = nil
+        var machineName: String? = nil
     }
 
     /// The single `UserDefaults` key (JSON-encoded `Snapshot`). Namespaced like `moments`/`sleepMarks`.
@@ -51,6 +55,7 @@ enum ActiveWorkoutPersistence {
         // Drop any out-of-range persisted HR samples (a real bpm + a positive ts only) — never trust the
         // blob to be clean. Parity with the Android decoder's 1...300 bpm / ts > 0 gate.
         let samples = raw.samples.filter { $0.ts > 0 && (1...300).contains($0.bpm) }
+        let machineSamples = (raw.machineSamples ?? []).filter { $0.t >= 0 }
         return Snapshot(
             startSec: raw.startSec,
             sport: raw.sport,
@@ -60,6 +65,10 @@ enum ActiveWorkoutPersistence {
             liveStrain: raw.liveStrain.isFinite ? max(0, raw.liveStrain) : 0,
             pausedAtSec: raw.pausedAtSec.flatMap { $0 > 0 ? $0 : nil },
             pausedDurationSec: raw.pausedDurationSec.map { max(0, $0) },
+            usesCompanion: raw.usesCompanion ?? false,
+            machineSamples: machineSamples,
+            lastMachineReading: raw.lastMachineReading,
+            machineName: raw.machineName,
         )
     }
 

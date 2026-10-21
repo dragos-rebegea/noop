@@ -124,6 +124,10 @@ final class AppModel: ObservableObject {
         var peakHr: Int = 0
         var pausedAt: Date?
         var pausedDuration: TimeInterval = 0
+        var usesCompanion: Bool = false
+        var machineSamples: [MachineSample] = []
+        var lastMachineReading: FTMSReading?
+        var machineName: String?
 
         var isPaused: Bool { pausedAt != nil }
 
@@ -145,6 +149,22 @@ final class AppModel: ObservableObject {
                 return false
             }
             samples.append(sample)
+            return true
+        }
+
+        mutating func recordMachineReading(_ reading: FTMSReading, elapsedSecond: Int) -> Bool {
+            lastMachineReading = reading
+            let sample = MachineSample(t: elapsedSecond, powerW: reading.powerWatts,
+                                       cadence: reading.cadence)
+            if let last = machineSamples.last, last.t == elapsedSecond {
+                let merged = MachineSample(t: elapsedSecond,
+                                           powerW: sample.powerW ?? last.powerW,
+                                           cadence: sample.cadence ?? last.cadence)
+                guard merged != last else { return false }
+                machineSamples[machineSamples.count - 1] = merged
+                return true
+            }
+            machineSamples.append(sample)
             return true
         }
 
@@ -292,6 +312,9 @@ final class AppModel: ObservableObject {
         live.$rr.sink { [weak self] rr in
             guard let self else { return }
             self.ingestHR(heartRate: self.live.heartRate, rr: rr)
+        }.store(in: &hrCancellables)
+        live.$machineReading.sink { [weak self] _ in
+            self?.captureWorkoutSample()
         }.store(in: &hrCancellables)
 
         // #2117: bank the device's R-R transport facts whenever a link comes up. Shell-independent on
@@ -657,6 +680,7 @@ final class AppModel: ObservableObject {
             registry?.setActive(serialId)
         }
         self.sourceCoordinator = coordinator
+        if activeWorkout?.usesCompanion == true { coordinator.startCompanion() }
         bindOuraFeatureStatusMirror()
         // #814 READ SPINE (HIGH-1): drive the read side off the registry's `activeDeviceId` for the WHOLE
         // session, exactly as SourceCoordinator drives the WRITE side off the SAME publisher. A Devices-
@@ -823,13 +847,14 @@ final class AppModel: ObservableObject {
     /// name; callers that don't pick a sport get the catalogue default "Other", parity with Android's
     /// `startWorkout(sport:)`). The active card on Live then shows elapsed time, live HR and strain
     /// building; End scores + saves it under this sport. Confirms with a single buzz. (#519)
-    func startWorkout(sport: String = WorkoutCatalog.defaultSportName) {
+    func startWorkout(sport: String = WorkoutCatalog.defaultSportName, useCompanion: Bool = false) {
         guard activeWorkout == nil else { return }
         lastWorkout = nil
         let name = sport.trimmingCharacters(in: .whitespaces)
         let resolved = name.isEmpty ? WorkoutCatalog.defaultSportName : name
         let started = Date()
-        activeWorkout = ActiveWorkout(start: started, sport: resolved)
+        activeWorkout = ActiveWorkout(start: started, sport: resolved, usesCompanion: useCompanion,
+                                      machineName: useCompanion ? ftmsCompanionDevice?.displayName : nil)
         // #524: arm GPS route recording for a distance-type sport (run / ride / walk / hike), mirroring
         // Android, which defaults GPS on for `isDistanceSport`. Manual-first / opt-in: only these sports
         // record a route, and the recorder still captures nothing unless the user grants When-In-Use
@@ -839,6 +864,7 @@ final class AppModel: ObservableObject {
         if activeWorkoutIsGps {
             gpsRecorder.start(startMs: Int64(started.timeIntervalSince1970 * 1000))
         }
+        if useCompanion { sourceCoordinator?.startCompanion() }
         // Make the session durable from the first instant (#529): persist it now so an OS kill right
         // after Start , before any HR sample lands , can still be rehydrated + ended on relaunch.
         persistActiveWorkout()
@@ -900,7 +926,11 @@ final class AppModel: ObservableObject {
                 peakHr: w.peakHr,
                 liveStrain: w.liveStrain,
                 pausedAtSec: w.pausedAt.map { Int($0.timeIntervalSince1970) },
-                pausedDurationSec: Int(w.pausedDuration)))
+                pausedDurationSec: Int(w.pausedDuration),
+                usesCompanion: w.usesCompanion,
+                machineSamples: w.machineSamples,
+                lastMachineReading: w.lastMachineReading,
+                machineName: w.machineName))
     }
 
     /// If a manual workout was in flight when iOS killed the app, rebuild `activeWorkout` from the durable
@@ -917,6 +947,10 @@ final class AppModel: ObservableObject {
         w.liveStrain = snap.liveStrain
         w.pausedAt = snap.pausedAtSec.map { Date(timeIntervalSince1970: TimeInterval($0)) }
         w.pausedDuration = TimeInterval(snap.pausedDurationSec ?? 0)
+        w.usesCompanion = snap.usesCompanion ?? false
+        w.machineSamples = snap.machineSamples ?? []
+        w.lastMachineReading = snap.lastMachineReading
+        w.machineName = snap.machineName
         activeWorkout = w
 
         // Rebuild the transient GPS lifecycle flag as well as the durable workout value. Without this,
@@ -951,6 +985,7 @@ final class AppModel: ObservableObject {
     /// Abort the active session without saving a workout.
     func discardWorkout() {
         guard activeWorkout != nil else { return }
+        sourceCoordinator?.stopCompanion()
         activeWorkout = nil
         if activeWorkoutIsGps { gpsRecorder.stop() }
         activeWorkoutIsGps = false
@@ -975,6 +1010,7 @@ final class AppModel: ObservableObject {
 
     func endWorkout() {
         guard let w = activeWorkout else { return }
+        sourceCoordinator?.stopCompanion()
         activeWorkout = nil
         let wasGps = activeWorkoutIsGps
         activeWorkoutIsGps = false
@@ -993,7 +1029,10 @@ final class AppModel: ObservableObject {
         let samples = w.samples
         // Save when there's an HR window OR a real GPS route , a GPS-only walk (HR not streaming) is
         // still a workout (parity with Android's `samples.size < 2 && track.size < 2` discard gate).
-        guard samples.count >= 2 || route != nil else {
+        let machineSummary = MachineSummary.from(samples: w.machineSamples,
+                                                 lastReading: w.lastMachineReading)
+        let hasMachineData = !w.machineSamples.isEmpty || w.lastMachineReading != nil
+        guard samples.count >= 2 || route != nil || hasMachineData else {
             // Workouts & GPS test mode: record WHY a session vanished (too short / no route), tagged `.workouts`.
             emitWorkoutsTrace(WorkoutsTrace.sessionLine(
                 event: "discarded", sportKey: WorkoutSource.traceSportKey(w.sport),
@@ -1056,7 +1095,18 @@ final class AppModel: ObservableObject {
             // GPS distance rides the shared row so the Workouts list / detail show it like any other
             // distance workout; the polyline itself is persisted alongside in RouteStore (the shared
             // WorkoutRow has no route column on Apple). Only a real route sets distance , honest ",".
-            distanceM: route?.distanceM, zonesJSON: nil, notes: nil, steps: nil)
+            distanceM: route?.distanceM ?? machineSummary.distanceM.map(Double.init),
+            zonesJSON: nil, notes: nil, steps: nil)
+        let machineRow: WorkoutMachineRow? = w.lastMachineReading.flatMap { reading in
+            guard let data = try? JSONEncoder().encode(w.machineSamples),
+                  let json = String(data: data, encoding: .utf8) else { return nil }
+            return WorkoutMachineRow(
+                deviceId: deviceId, startTs: startTs, machineKind: reading.kind.rawValue,
+                machineName: w.machineName, avgPowerW: machineSummary.avgPowerW,
+                maxPowerW: machineSummary.maxPowerW, avgCadence: machineSummary.avgCadence,
+                distanceM: machineSummary.distanceM, energyKcal: machineSummary.machineEnergyKcal,
+                elapsedS: machineSummary.elapsedS, samplesJSON: json)
+        }
         // Persist the route polyline under the row's natural key so WorkoutDetailView can draw it. On
         // device only; mirrors the moments / sleepMarks UserDefaults persistence. (#524)
         if let route { RouteStore.store(route, startTs: startTs, sport: w.sport) }
@@ -1074,6 +1124,7 @@ final class AppModel: ObservableObject {
             guard let self else { return }
             if let store = await self.repo.storeHandle() {
                 _ = try? await store.upsertWorkouts([row], deviceId: self.deviceId)
+                if let machineRow { _ = try? await store.upsertWorkoutMachine(machineRow) }
                 await self.repo.refresh()
             }
         }
@@ -1083,12 +1134,30 @@ final class AppModel: ObservableObject {
     /// from `ingestHR` on every fresh sample; a no-op when no workout is running. Recomputing strain
     /// over the growing window each sample is cheap at the ~1 Hz live-HR cadence.
     private func captureWorkoutSample() {
-        guard var w = activeWorkout, !w.isPaused, let hr = bpm else { return }
+        guard var w = activeWorkout, !w.isPaused else { return }
+        let now = Date()
+        var changed = false
+        if w.usesCompanion, live.machineState == .live, let reading = live.machineReading {
+            let previousReading = w.lastMachineReading
+            let sampleChanged = w.recordMachineReading(reading, elapsedSecond: Int(w.elapsed(at: now)))
+            w.machineName = live.machineName ?? w.machineName
+            changed = sampleChanged || previousReading != reading
+        }
+        guard let hr = bpm else {
+            if changed {
+                activeWorkout = w
+                persistActiveWorkout()
+            }
+            return
+        }
         // A second that already has its sample moves only the peak: publish that, and skip the rescore and the
         // snapshot (the next second's sample carries the peak into the snapshot).
         let peakBefore = w.peakHr
-        guard w.recordSample(HRSample(ts: Int(Date().timeIntervalSince1970), bpm: hr)) else {
-            if w.peakHr != peakBefore { activeWorkout = w }
+        guard w.recordSample(HRSample(ts: Int(now.timeIntervalSince1970), bpm: hr)) else {
+            if w.peakHr != peakBefore || changed {
+                activeWorkout = w
+                persistActiveWorkout()
+            }
             return
         }
         w.peakHr = max(w.peakHr, hr)
@@ -1244,9 +1313,10 @@ final class AppModel: ObservableObject {
     /// single write path: `add` upserts the row, and when `makeActive` is true `setActive` promotes it
     /// (the SourceCoordinator reacts to the active-device change and connects). No-op if the registry
     /// hasn't been wired yet (pre store-open) , the wizard is only reachable once it has.
-    func registerDevice(_ device: PairedDevice, makeActive: Bool) {
+    func registerDevice(_ device: PairedDevice, makeActive: Bool, makeCompanion: Bool = false) {
         guard let registry = deviceRegistry else { return }
         registry.add(device)
+        if makeCompanion { sourceCoordinator?.setCompanionDevice(device.id) }
         if makeActive {
             // `setActive` republishes `registry.$activeDeviceId`, which the read-spine subscription
             // (`readSpineCancellable`, wired in `wireSourceCoordinator`) observes and re-points the reads
@@ -1256,6 +1326,18 @@ final class AppModel: ObservableObject {
             registry.setActive(device.id)
             Task { [weak self] in await self?.adoptActiveDevice(device.id) }
         }
+    }
+
+    var ftmsCompanionDevice: PairedDevice? { sourceCoordinator?.companionDevice }
+
+    func setFTMSCompanion(_ device: PairedDevice?) {
+        sourceCoordinator?.setCompanionDevice(device?.id)
+        objectWillChange.send()
+    }
+
+    func clearFTMSCompanionIfMatches(_ id: String) {
+        sourceCoordinator?.clearCompanionIfMatches(id)
+        objectWillChange.send()
     }
 
     #if os(iOS)

@@ -307,6 +307,10 @@ Windows are taken relative to your latest recorded day and auto-widen on sparse 
   icons.
 - **All Sessions** — a uniform table: date/time, sport, duration, avg HR, kcal, distance, and a
   **source badge** (WHOOP or Apple) per row.
+- **FTMS workout companion**: pair supported gym equipment and keep WHOOP active as the heart-rate
+  source. An optional per-workout toggle connects the machine only while recording. Live power,
+  cadence, speed, distance, machine calories, and machine time are read from notifications and stored
+  locally with the workout. The connection is read-only and never uses the FTMS Control Point.
 
 ---
 

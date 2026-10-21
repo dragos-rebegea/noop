@@ -60,6 +60,8 @@ final class SourceCoordinator: ObservableObject {
     /// Item 27: the learned night band an Oura ring's all-day HR hold stands down for (nil = cold start).
     /// Read at each decision by `OuraLiveSource`; the app layer derives it from the sleep learner.
     private let ouraNightBand: () -> NightStandDown.Band?
+    private let defaults: UserDefaults
+    private let makeCompanionSource: ((LiveState, String?) -> any LiveHRSource)?
 
     // MARK: - State
 
@@ -69,6 +71,9 @@ final class SourceCoordinator: ObservableObject {
     /// `scan`s / `stop`s it. Built by `makeSource(for:)`; each source owns its OWN `CBCentralManager` and
     /// never references `BLEManager`/`WhoopBleClient`, so the WHOOP path cannot regress.
     private var activeSource: (any LiveHRSource)?
+    private var companionSource: (any LiveHRSource)?
+    static let companionDeviceIdKey = "ftms.companionDeviceId"
+    @Published private(set) var companionDeviceId: String?
     /// The live Oura source, TYPED, kept ALONGSIDE `activeSource` purely so `AppModel` can observe its
     /// `adoptPhase` / `needsPairing` for the adopt wizard (`coordinator.$ouraSource`). Set in `makeOura`
     /// (the same object as `activeSource` while an Oura ring is live) and cleared in
@@ -120,7 +125,9 @@ final class SourceCoordinator: ObservableObject {
          setWhoopActiveDeviceId: @escaping (String) -> Void,
          connectedPeripheralUUID: AnyPublisher<String?, Never>,
          straplog: @escaping (String) -> Void = { _ in },
-         ouraNightBand: @escaping () -> NightStandDown.Band? = { nil }) {
+         ouraNightBand: @escaping () -> NightStandDown.Band? = { nil },
+         defaults: UserDefaults = .standard,
+         makeCompanionSource: ((LiveState, String?) -> any LiveHRSource)? = nil) {
         self.registry = registry
         self.live = live
         self.storeHandle = storeHandle
@@ -131,6 +138,9 @@ final class SourceCoordinator: ObservableObject {
         self.connectedPeripheralUUID = connectedPeripheralUUID
         self.straplog = straplog
         self.ouraNightBand = ouraNightBand
+        self.defaults = defaults
+        self.makeCompanionSource = makeCompanionSource
+        self.companionDeviceId = defaults.string(forKey: Self.companionDeviceIdKey)
     }
 
     // MARK: - Wiring
@@ -164,6 +174,9 @@ final class SourceCoordinator: ObservableObject {
     ///   • WHOOP active after a strap → stop the strap source + resume WHOOP.
     ///   • A generic strap → pause WHOOP + (re)start `StandardHRSource` for that strap's id.
     func activeDeviceChanged(to id: String) {
+        if companionDeviceId == id {
+            setCompanionDevice(nil)
+        }
         // #2208: publish whose device this is BEFORE any branch returns. Readouts that show the strap's
         // charge need it to know the number is not the active device's, and the Apple Watch path below
         // short-circuits, so setting it inside the WHOOP/strap split would leave a watch reading `true`.
@@ -327,6 +340,60 @@ final class SourceCoordinator: ObservableObject {
             live: live,
             log: straplog,
             onBattery: { [live] pct in live.setBattery(Double(pct)) })
+    }
+
+    // MARK: - FTMS companion
+
+    var companionDevice: PairedDevice? {
+        guard let companionDeviceId else { return nil }
+        return registry.devices.first {
+            $0.id == companionDeviceId && $0.sourceKind == .ftms && $0.status != .archived
+        }
+    }
+
+    func setCompanionDevice(_ id: String?) {
+        let validId = id.flatMap { candidate in
+            registry.devices.first {
+                $0.id == candidate && $0.id != registry.activeDeviceId &&
+                    $0.sourceKind == .ftms && $0.status != .archived
+            }?.id
+        }
+        if companionDeviceId != validId { stopCompanion() }
+        companionDeviceId = validId
+        if let validId {
+            defaults.set(validId, forKey: Self.companionDeviceIdKey)
+        } else {
+            defaults.removeObject(forKey: Self.companionDeviceIdKey)
+        }
+    }
+
+    func clearCompanionIfMatches(_ id: String) {
+        guard companionDeviceId == id else { return }
+        setCompanionDevice(nil)
+    }
+
+    func startCompanion() {
+        guard let device = companionDevice, device.id != registry.activeDeviceId else {
+            stopCompanion()
+            return
+        }
+        stopCompanion()
+        live.machineName = device.displayName
+        live.machineState = .connecting
+        let source = makeCompanionSource?(live, device.displayName) ?? FTMSSource(
+            live: live, log: straplog, role: .companion, preferredName: device.displayName)
+        companionSource = source
+        if let peripheralId = device.peripheralId, let uuid = UUID(uuidString: peripheralId) {
+            source.connect(uuid)
+        } else {
+            source.scan()
+        }
+    }
+
+    func stopCompanion() {
+        companionSource?.stop()
+        companionSource = nil
+        live.clearMachine()
     }
 
     /// Build the EXPERIMENTAL Huami source (Amazfit / Zepp / Mi Band) for `id`. HR (standard 0x180D when
