@@ -51,6 +51,12 @@ public final class FTMSSource: NSObject, ObservableObject {
     // MARK: - Standard BLE UUIDs
 
     private static let fitnessMachineService = CBUUID(string: "1826")
+    /// The Concept2 PM5 advertises its own discovery service rather than 0x1826, even on firmware that
+    /// serves FTMS once connected, so a scan filtered on 0x1826 alone never sees a BikeErg / RowErg /
+    /// SkiErg. Scanning for both finds it; the FTMS service is still required after connect.
+    private static let concept2DiscoveryService = CBUUID(string: "CE060000-43E5-11E4-916C-0800200C9A66")
+    /// Services a scan matches on: the standard FTMS service plus advertisers known to hide it.
+    private static let scanServices = [fitnessMachineService, concept2DiscoveryService]
     private static let batteryService = CBUUID(string: "180F")
     private static let batteryLevel = CBUUID(string: "2A19")
     /// The four machine-data characteristics we read, mapped to their FTMS kind. We subscribe to
@@ -122,7 +128,7 @@ public final class FTMSSource: NSObject, ObservableObject {
             log("FTMS: Bluetooth not powered on (state=\(central.state.rawValue)) — scan deferred until ready")
             return
         }
-        central.scanForPeripherals(withServices: [Self.fitnessMachineService],
+        central.scanForPeripherals(withServices: Self.scanServices,
                                    options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
     }
 
@@ -277,7 +283,7 @@ extension FTMSSource: @preconcurrency CBCentralManagerDelegate {
                     central.connect(p, options: nil)
                 }
             case .scan:
-                central.scanForPeripherals(withServices: [Self.fitnessMachineService],
+                central.scanForPeripherals(withServices: Self.scanServices,
                                            options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
             case .discover:
                 // Nothing to connect and no scan armed, because the intent was parked before the
