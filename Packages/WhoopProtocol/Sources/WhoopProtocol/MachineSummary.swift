@@ -138,3 +138,34 @@ public struct MachineSummary: Codable, Equatable, Sendable {
         )
     }
 }
+
+/// One lap marked during a machine workout, on the same `t` axis as `MachineSample` (seconds from the
+/// workout start). `endT` is exclusive. Only the marks are stored: every per-lap figure is derived from
+/// the samples when it is shown.
+public struct MachineLap: Codable, Equatable, Sendable {
+    public let index: Int
+    public let startT: Int
+    public let endT: Int
+
+    public init(index: Int, startT: Int, endT: Int) {
+        self.index = index
+        self.startT = startT
+        self.endT = endT
+    }
+
+    /// Duration in wall-clock seconds.
+    public var durationS: Int { max(0, endT - startT) }
+
+    /// The samples that fall inside this lap.
+    public func samples(from all: [MachineSample]) -> [MachineSample] {
+        all.filter { $0.t >= startT && $0.t < endT }
+    }
+
+    /// Closes the open lap at `t` and returns the laps with a new one starting there. `start` is where the
+    /// first lap begins when none has been marked yet. A mark at or before the open lap's start is ignored.
+    public static func marking(_ laps: [MachineLap], at t: Int, start: Int = 0) -> [MachineLap] {
+        let openStart = laps.last?.endT ?? start
+        guard t > openStart else { return laps }
+        return laps + [MachineLap(index: laps.count + 1, startT: openStart, endT: t)]
+    }
+}

@@ -97,6 +97,26 @@ final class ActiveWorkoutPersistenceTests: XCTestCase {
         XCTAssertNil(decoded?.machineTotals)
     }
 
+    func testLapsRoundTripAndDropInvalidMarks() {
+        var original = snapshot(usesCompanion: true)
+        original.laps = [MachineLap(index: 1, startT: 0, endT: 300), MachineLap(index: 2, startT: 300, endT: 610)]
+        XCTAssertEqual(ActiveWorkoutPersistence.decode(ActiveWorkoutPersistence.encode(original)), original)
+
+        var corrupt = original
+        corrupt.laps = [MachineLap(index: 1, startT: 0, endT: 300), MachineLap(index: 2, startT: 300, endT: 300)]
+        XCTAssertEqual(ActiveWorkoutPersistence.decode(ActiveWorkoutPersistence.encode(corrupt))?.laps,
+                       [MachineLap(index: 1, startT: 0, endT: 300)])
+    }
+
+    /// The ride saved with marked laps closes the open lap after the last sample; a ride without marks
+    /// saves none.
+    func testClosingLapsAtEnd() {
+        let samples = (0..<900).map { MachineSample(t: $0, powerW: 200) }
+        XCTAssertEqual(AppModel.closingLaps([], samples: samples), [])
+        let closed = AppModel.closingLaps([MachineLap(index: 1, startT: 0, endT: 300)], samples: samples)
+        XCTAssertEqual(closed, [MachineLap(index: 1, startT: 0, endT: 300), MachineLap(index: 2, startT: 300, endT: 900)])
+    }
+
     // MARK: - UserDefaults store / load / clear
 
     func testStoreLoadClearRoundTrip() {

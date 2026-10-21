@@ -12,7 +12,7 @@ final class WorkoutMachineStoreTests: XCTestCase {
         XCTAssertTrue(tables.contains("workoutMachine"))
         XCTAssertEqual(columns, [
             "deviceId", "startTs", "machineKind", "machineName", "avgPowerW", "maxPowerW",
-            "avgCadence", "distanceM", "energyKcal", "elapsedS", "samplesJSON",
+            "avgCadence", "distanceM", "energyKcal", "elapsedS", "samplesJSON", "lapsJSON", "ftpW",
         ])
         XCTAssertEqual(primaryKey, ["deviceId", "startTs"])
         XCTAssertTrue(DeviceRegistryStore.deviceScopedTables.contains("workoutMachine"))
@@ -35,6 +35,46 @@ final class WorkoutMachineStoreTests: XCTestCase {
             try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM workout WHERE deviceId = 'dev'")
         }
         XCTAssertEqual(count, 1)
+    }
+
+    func testV50AddsLapsAndFtpWithoutTouchingV49Rows() async throws {
+        let dbQueue = try DatabaseQueue()
+        try WhoopStore.makeMigrator().migrate(dbQueue, upTo: "v49-workout-machine")
+        try await dbQueue.write { db in
+            try db.execute(sql: """
+                INSERT INTO workoutMachine
+                    (deviceId, startTs, machineKind, machineName, avgPowerW, maxPowerW,
+                     avgCadence, distanceM, energyKcal, elapsedS, samplesJSON)
+                VALUES ('dev', 100, 'indoorBike', 'Bike', 180, 400, 85, 10000, 300, 2000, '[]')
+                """)
+        }
+
+        try WhoopStore.makeMigrator().migrate(dbQueue)
+
+        let row = try await dbQueue.read { db in
+            try Row.fetchOne(db, sql: "SELECT avgPowerW, samplesJSON, lapsJSON, ftpW FROM workoutMachine")
+        }
+        XCTAssertEqual(row?["avgPowerW"] as Double?, 180)
+        XCTAssertEqual(row?["samplesJSON"] as String?, "[]")
+        XCTAssertNil(row?["lapsJSON"] as String?)
+        XCTAssertNil(row?["ftpW"] as Int?)
+    }
+
+    func testLapsAndFtpRoundTripAndSurviveCopy() async throws {
+        let store = try await WhoopStore.inMemory()
+        let row = WorkoutMachineRow(
+            deviceId: "dev", startTs: 100, machineKind: "indoorBike", machineName: "Bike",
+            avgPowerW: 200, maxPowerW: 300, avgCadence: 90, distanceM: 1_000,
+            energyKcal: 50, elapsedS: 600, samplesJSON: "[]",
+            lapsJSON: #"[{"index":1,"startT":0,"endT":300}]"#, ftpW: 250)
+        try await store.upsertWorkoutMachine(row)
+        let read = try await store.workoutMachine(deviceId: "dev", startTs: 100)
+        XCTAssertEqual(read, row)
+
+        try await store.copyWorkoutMachine(deviceId: "dev", fromStartTs: 100, toStartTs: 160)
+        let copied = try await store.workoutMachine(deviceId: "dev", startTs: 160)
+        XCTAssertEqual(copied?.lapsJSON, row.lapsJSON)
+        XCTAssertEqual(copied?.ftpW, 250)
     }
 
     func testWorkoutMachineRoundTripsAndUpserts() async throws {

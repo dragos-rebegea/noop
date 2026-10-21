@@ -272,6 +272,7 @@ struct SettingsView: View {
                 appearanceCard.staggeredAppear(index: 2)
                 #if os(iOS)
                 foodLoggingCard
+                bikeTrainingCard
                 #endif
                 strapCard.staggeredAppear(index: 3)
                 #if os(iOS)
@@ -1421,6 +1422,13 @@ struct SettingsView: View {
                     }
                 }
             }
+        }
+    }
+
+    private var bikeTrainingCard: some View {
+        SettingsSection(icon: "bicycle", title: "Bike training",
+                        blurb: "FTP, target intensity and fuelling reminders for indoor rides with a power machine.") {
+            BikeTrainingSettingsFields()
         }
     }
 

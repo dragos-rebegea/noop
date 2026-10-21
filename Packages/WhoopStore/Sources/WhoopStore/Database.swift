@@ -1157,6 +1157,15 @@ extension WhoopStore {
                 t.primaryKey(["deviceId", "startTs"])
             }
         }
+        // v50: bike training. `lapsJSON` holds the lap marks (`[MachineLap]`; per-lap figures are derived
+        // from the samples at display time, never stored) and `ftpW` the FTP in force when the ride was
+        // recorded, so later FTP changes do not rewrite historical IF / TSS. Additive columns only.
+        migrator.registerMigration("v50-workout-machine-laps") { db in
+            try db.alter(table: "workoutMachine") { t in
+                t.add(column: "lapsJSON", .text)
+                t.add(column: "ftpW", .integer)
+            }
+        }
         return migrator
     }
 }

@@ -129,6 +129,8 @@ final class AppModel: ObservableObject {
         var lastMachineReading: FTMSReading?
         var machineTotals = MachineTotals()
         var machineName: String?
+        /// Completed laps marked on the bike layout; the open lap runs from the last `endT` to now.
+        var laps: [MachineLap] = []
 
         var isPaused: Bool { pausedAt != nil }
 
@@ -945,7 +947,8 @@ final class AppModel: ObservableObject {
                 machineSamples: w.machineSamples,
                 lastMachineReading: w.lastMachineReading,
                 machineName: w.machineName,
-                machineTotals: w.machineTotals))
+                machineTotals: w.machineTotals,
+                laps: w.laps))
     }
 
     /// If a manual workout was in flight when iOS killed the app, rebuild `activeWorkout` from the durable
@@ -969,6 +972,7 @@ final class AppModel: ObservableObject {
         // A relaunch cannot know what the machine counted while the app was dead: start a new segment.
         w.machineTotals.breakSegment()
         w.machineName = snap.machineName
+        w.laps = snap.laps ?? []
         activeWorkout = w
 
         // Rebuild the transient GPS lifecycle flag as well as the durable workout value. Without this,
@@ -1122,12 +1126,16 @@ final class AppModel: ObservableObject {
         let machineRow: WorkoutMachineRow? = w.lastMachineReading.flatMap { reading in
             guard let data = try? JSONEncoder().encode(w.machineSamples),
                   let json = String(data: data, encoding: .utf8) else { return nil }
+            let laps = Self.closingLaps(w.laps, samples: w.machineSamples)
+            let lapsJSON = laps.isEmpty ? nil
+                : (try? JSONEncoder().encode(laps)).flatMap { String(data: $0, encoding: .utf8) }
             return WorkoutMachineRow(
                 deviceId: deviceId, startTs: startTs, machineKind: reading.kind.rawValue,
                 machineName: w.machineName, avgPowerW: machineSummary.avgPowerW,
                 maxPowerW: machineSummary.maxPowerW, avgCadence: machineSummary.avgCadence,
                 distanceM: machineSummary.distanceM, energyKcal: machineSummary.machineEnergyKcal,
-                elapsedS: machineSummary.elapsedS, samplesJSON: json)
+                elapsedS: machineSummary.elapsedS, samplesJSON: json,
+                lapsJSON: lapsJSON, ftpW: BikeTrainingPrefs.ftp())
         }
         // Persist the route polyline under the row's natural key so WorkoutDetailView can draw it. On
         // device only; mirrors the moments / sleepMarks UserDefaults persistence. (#524)
@@ -1150,6 +1158,27 @@ final class AppModel: ObservableObject {
                 await self.repo.refresh()
             }
         }
+    }
+
+    /// The laps saved with a ride: the marked laps plus the open one closed after the last sample. A ride
+    /// with no marks saves none (the whole ride is the only lap, which the summary already shows).
+    nonisolated static func closingLaps(_ laps: [MachineLap], samples: [MachineSample]) -> [MachineLap] {
+        guard !laps.isEmpty, let last = samples.last?.t else { return laps }
+        return MachineLap.marking(laps, at: last + 1)
+    }
+
+    /// Marks a lap on the active workout at the current wall-clock second (bike layout). Ignored while
+    /// paused or within the open lap's first second.
+    func markLap() {
+        guard var w = activeWorkout, !w.isPaused else { return }
+        foldPendingMachine(into: &w)
+        let now = Int(Date().timeIntervalSince(w.start))
+        let marked = MachineLap.marking(w.laps, at: now)
+        guard marked != w.laps else { return }
+        w.laps = marked
+        activeWorkout = w
+        persistActiveWorkout()
+        buzz(loops: 1, gate: HapticPrefs.workout)
     }
 
     /// Append the current smoothed `bpm` to the active workout and recompute its running strain. Called

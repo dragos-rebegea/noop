@@ -14,10 +14,15 @@ public struct WorkoutMachineRow: Equatable, Codable, Sendable {
     public let energyKcal: Int?
     public let elapsedS: Int?
     public let samplesJSON: String
+    /// Lap marks as JSON (`[MachineLap]`), nil when the ride had none (v50).
+    public let lapsJSON: String?
+    /// FTP in force when the ride was recorded (v50); nil when none was set.
+    public let ftpW: Int?
 
     public init(deviceId: String, startTs: Int, machineKind: String, machineName: String?,
                 avgPowerW: Double?, maxPowerW: Int?, avgCadence: Double?, distanceM: Int?,
-                energyKcal: Int?, elapsedS: Int?, samplesJSON: String) {
+                energyKcal: Int?, elapsedS: Int?, samplesJSON: String,
+                lapsJSON: String? = nil, ftpW: Int? = nil) {
         self.deviceId = deviceId
         self.startTs = startTs
         self.machineKind = machineKind
@@ -29,6 +34,8 @@ public struct WorkoutMachineRow: Equatable, Codable, Sendable {
         self.energyKcal = energyKcal
         self.elapsedS = elapsedS
         self.samplesJSON = samplesJSON
+        self.lapsJSON = lapsJSON
+        self.ftpW = ftpW
     }
 }
 
@@ -40,8 +47,8 @@ extension WhoopStore {
             try db.execute(sql: """
                 INSERT INTO workoutMachine
                     (deviceId, startTs, machineKind, machineName, avgPowerW, maxPowerW,
-                     avgCadence, distanceM, energyKcal, elapsedS, samplesJSON)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     avgCadence, distanceM, energyKcal, elapsedS, samplesJSON, lapsJSON, ftpW)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(deviceId, startTs) DO UPDATE SET
                     machineKind = excluded.machineKind,
                     machineName = excluded.machineName,
@@ -51,10 +58,12 @@ extension WhoopStore {
                     distanceM = excluded.distanceM,
                     energyKcal = excluded.energyKcal,
                     elapsedS = excluded.elapsedS,
-                    samplesJSON = excluded.samplesJSON
+                    samplesJSON = excluded.samplesJSON,
+                    lapsJSON = excluded.lapsJSON,
+                    ftpW = excluded.ftpW
                 """, arguments: [row.deviceId, row.startTs, row.machineKind, row.machineName,
                                    row.avgPowerW, row.maxPowerW, row.avgCadence, row.distanceM,
-                                   row.energyKcal, row.elapsedS, row.samplesJSON])
+                                   row.energyKcal, row.elapsedS, row.samplesJSON, row.lapsJSON, row.ftpW])
             return db.changesCount
         }
     }
@@ -70,9 +79,9 @@ extension WhoopStore {
             try db.execute(sql: """
                 INSERT OR REPLACE INTO workoutMachine
                     (deviceId, startTs, machineKind, machineName, avgPowerW, maxPowerW,
-                     avgCadence, distanceM, energyKcal, elapsedS, samplesJSON)
+                     avgCadence, distanceM, energyKcal, elapsedS, samplesJSON, lapsJSON, ftpW)
                 SELECT deviceId, ?, machineKind, machineName, avgPowerW, maxPowerW,
-                       avgCadence, distanceM, energyKcal, elapsedS, samplesJSON
+                       avgCadence, distanceM, energyKcal, elapsedS, samplesJSON, lapsJSON, ftpW
                 FROM workoutMachine WHERE deviceId = ? AND startTs = ?
                 """, arguments: [toStartTs, deviceId, fromStartTs])
             return db.changesCount > 0
@@ -84,7 +93,7 @@ extension WhoopStore {
         try syncRead { db in
             try Row.fetchOne(db, sql: """
                 SELECT deviceId, startTs, machineKind, machineName, avgPowerW, maxPowerW,
-                       avgCadence, distanceM, energyKcal, elapsedS, samplesJSON
+                       avgCadence, distanceM, energyKcal, elapsedS, samplesJSON, lapsJSON, ftpW
                 FROM workoutMachine WHERE deviceId = ? AND startTs = ?
                 """, arguments: [deviceId, startTs]).map {
                     WorkoutMachineRow(
@@ -93,7 +102,8 @@ extension WhoopStore {
                         avgPowerW: $0["avgPowerW"], maxPowerW: $0["maxPowerW"],
                         avgCadence: $0["avgCadence"], distanceM: $0["distanceM"],
                         energyKcal: $0["energyKcal"], elapsedS: $0["elapsedS"],
-                        samplesJSON: $0["samplesJSON"])
+                        samplesJSON: $0["samplesJSON"],
+                        lapsJSON: $0["lapsJSON"], ftpW: $0["ftpW"])
                 }
         }
     }

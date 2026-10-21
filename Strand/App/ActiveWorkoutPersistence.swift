@@ -35,6 +35,7 @@ enum ActiveWorkoutPersistence {
         var lastMachineReading: FTMSReading? = nil
         var machineName: String? = nil
         var machineTotals: MachineTotals? = nil
+        var laps: [MachineLap]? = nil
     }
 
     /// The single `UserDefaults` key (JSON-encoded `Snapshot`). Namespaced like `moments`/`sleepMarks`.
@@ -71,6 +72,7 @@ enum ActiveWorkoutPersistence {
             lastMachineReading: raw.lastMachineReading,
             machineName: raw.machineName,
             machineTotals: raw.machineTotals,
+            laps: raw.laps.map { $0.filter { $0.startT >= 0 && $0.endT > $0.startT } },
         )
     }
 

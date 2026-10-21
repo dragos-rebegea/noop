@@ -140,4 +140,22 @@ final class MachineSummaryTests: XCTestCase {
 
         XCTAssertEqual(bike.merging(rower), rower)
     }
+
+    func testLapMarkingAndSlicing() throws {
+        var laps = MachineLap.marking([], at: 120)
+        XCTAssertEqual(laps, [MachineLap(index: 1, startT: 0, endT: 120)])
+        laps = MachineLap.marking(laps, at: 120)
+        XCTAssertEqual(laps.count, 1, "a mark at the open lap's start is ignored")
+        laps = MachineLap.marking(laps, at: 300)
+        XCTAssertEqual(laps.last, MachineLap(index: 2, startT: 120, endT: 300))
+        XCTAssertEqual(laps.last?.durationS, 180)
+
+        let samples = (0..<400).map { MachineSample(t: $0, powerW: $0) }
+        let lap2 = laps[1].samples(from: samples)
+        XCTAssertEqual(lap2.first?.t, 120)
+        XCTAssertEqual(lap2.last?.t, 299)
+
+        let json = try JSONEncoder().encode(laps)
+        XCTAssertEqual(try JSONDecoder().decode([MachineLap].self, from: json), laps)
+    }
 }
