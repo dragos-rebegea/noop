@@ -40,37 +40,52 @@ struct LiveWorkoutView: View {
     @State private var showEndConfirm = false
     @State private var showDeleteConfirm = false
 
+    /// The riding-first bike layout replaces the HR-led one for an indoor-bike companion ride with power.
+    private var isBikeLayout: Bool { model.activeWorkout?.isBikeRide == true }
+
     private var zoneSet: HRZoneSet { model.profile.hrZoneSet }
     private var zone: Int { model.bpm.map { zoneSet.zoneNumber(forBPM: Double($0)) } ?? 0 }
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
-                let cards: [AnyView] = [
-                    AnyView(header),
-                    AnyView(timeBlock),
-                    AnyView(heartRateBlock),
-                    AnyView(effortGauge),
-                    AnyView(zoneSection),
-                    AnyView(statsGrid),
-                    // Live GPS distance + pace (#1195) — a self-gating leaf owning its own recorder
-                    // observation, so a GPS fix re-renders only this card. Renders nothing until the first
-                    // accepted fix, so non-GPS / denied sessions leave the stack unchanged.
-                    AnyView(DistancePaceRowIfPresent(recorder: model.gpsRecorder)),
-                ]
-                ForEach(Array(cards.enumerated()), id: \.offset) { index, card in
-                    card.staggeredAppear(index: index)
+            if isBikeLayout {
+                VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
+                    LiveBikeDashboard()
+                    // Link status only (connecting / disconnected); the dashboard owns the figures.
+                    MachineRowIfPresent(statusOnly: true, onReconnect: { model.retryFTMSCompanion() })
                 }
-                // Live-observing leaf: renders the sensor row (and its entrance stagger) only when a
-                // standard fitness sensor is feeding metrics, refreshing on its own packets without
-                // re-rendering the HR hero / effort gauge above (scroll-stutter isolation).
-                SensorRowIfPresent()
-                MachineRowIfPresent(onReconnect: { model.retryFTMSCompanion() })
+                .screenPadding()
+                .padding(.vertical, NoopMetrics.space6)
+                .padding(.bottom, NoopMetrics.space8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
+                    let cards: [AnyView] = [
+                        AnyView(header),
+                        AnyView(timeBlock),
+                        AnyView(heartRateBlock),
+                        AnyView(effortGauge),
+                        AnyView(zoneSection),
+                        AnyView(statsGrid),
+                        // Live GPS distance + pace (#1195) — a self-gating leaf owning its own recorder
+                        // observation, so a GPS fix re-renders only this card. Renders nothing until the first
+                        // accepted fix, so non-GPS / denied sessions leave the stack unchanged.
+                        AnyView(DistancePaceRowIfPresent(recorder: model.gpsRecorder)),
+                    ]
+                    ForEach(Array(cards.enumerated()), id: \.offset) { index, card in
+                        card.staggeredAppear(index: index)
+                    }
+                    // Live-observing leaf: renders the sensor row (and its entrance stagger) only when a
+                    // standard fitness sensor is feeding metrics, refreshing on its own packets without
+                    // re-rendering the HR hero / effort gauge above (scroll-stutter isolation).
+                    SensorRowIfPresent()
+                    MachineRowIfPresent(onReconnect: { model.retryFTMSCompanion() })
+                }
+                .screenPadding()
+                .padding(.vertical, NoopMetrics.space6)
+                .padding(.bottom, NoopMetrics.space8)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .screenPadding()
-            .padding(.vertical, NoopMetrics.space6)
-            .padding(.bottom, NoopMetrics.space8)
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
         #if os(iOS)
         // #697/#horizontal-swipe parity, see ScreenScaffold. This is the full-screen in-exercise
@@ -99,9 +114,12 @@ struct LiveWorkoutView: View {
         // requestRealtimeHr/releaseRealtimeHr). Balanced: one start on appear, one stop on disappear.
         .onAppear {
             model.startRealtimeHR()
-            // Hold the display awake for the session only if the user opted in (#703).
-            if keepScreenOn { ScreenIdle.keepAwake(true) }
+            // Hold the display awake for the session only if the user opted in (#703), or always on
+            // the bike layout: a phone on a trainer mount is read, not touched, for the whole ride.
+            if keepScreenOn || isBikeLayout { ScreenIdle.keepAwake(true) }
         }
+        // The bike layout can begin after the screen appears (power arrives a few seconds in).
+        .onChangeCompat(of: isBikeLayout) { bike in if bike { ScreenIdle.keepAwake(true) } }
         .onDisappear {
             model.stopRealtimeHR()
             // Always release on the way out so the system idle timer resumes. Even if the toggle was
@@ -358,20 +376,25 @@ struct LiveWorkoutView: View {
         HStack(spacing: NoopMetrics.space2) {
             deleteWorkoutGlassButton
             pauseWorkoutGlassButton
-            Spacer(minLength: NoopMetrics.space2)
             bottomElapsedTimer
                 .allowsHitTesting(false)
                 // Scaling down is the honest failure when the room runs out: truncating a clock to
                 // "1:30:0" would be worse than a smaller one. Same idiom the rest of this file uses.
                 .lineLimit(1)
-                .minimumScaleFactor(0.6)
+                .minimumScaleFactor(0.4)
+                .allowsTightening(true)
                 // NO layoutPriority here, deliberately. Raising the timer's priority sizes it BEFORE
                 // the three circles, and those are fixed 56pt frames — inflexible, so when the space
                 // runs out they do not shrink, they clip. That inverts which element gives way: a
                 // half-drawn pause button is worse than a smaller clock, and a clipped control is the
                 // failure this whole change exists to remove. At equal priority the inflexible frames
                 // are satisfied first and the Text scales into what is left, which is the order wanted.
-            Spacer(minLength: NoopMetrics.space2)
+                //
+                // No Spacers either side of it: a Spacer is exactly as flexible as the timer's
+                // `maxWidth: .infinity` frame, so the HStack split the leftover width three ways and the
+                // timer got a third of it, which rendered "4:12" as "4:..." even before any scaling. The
+                // timer's own frame now takes all of the leftover room and centres the text inside it.
+            if isBikeLayout { lapGlassButton }
             endWorkoutGlassButton
         }
         .padding(Self.bottomBarInset)
@@ -425,6 +448,20 @@ struct LiveWorkoutView: View {
         }
         .nativeLiquidGlassWorkoutControl()
         .accessibilityLabel(Text(paused ? "Resume" : "Pause"))
+    }
+
+    /// Marks a lap (bike layout only).
+    private var lapGlassButton: some View {
+        Button { model.markLap() } label: {
+            Image(systemName: "flag.checkered")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(StrandPalette.textPrimary)
+                .frame(width: Self.bottomControlDiameter, height: Self.bottomControlDiameter)
+                .contentShape(Circle())
+        }
+        .nativeLiquidGlassWorkoutControl()
+        .accessibilityLabel(Text("Lap"))
+        .accessibilityHint(Text("Ends the current lap and starts a new one"))
     }
 
     private var deleteWorkoutGlassButton: some View {
@@ -546,6 +583,8 @@ private struct SensorRowIfPresent: View {
 /// notifications do not invalidate the workout hero or heart-rate charts above it.
 private struct MachineRowIfPresent: View {
     @EnvironmentObject private var live: LiveState
+    /// Shows only the connecting / disconnected states (the bike layout renders the figures itself).
+    var statusOnly: Bool = false
     /// Restarts the companion link with a fresh reconnect budget (the automatic retries give up after five).
     let onReconnect: () -> Void
     @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
@@ -572,7 +611,7 @@ private struct MachineRowIfPresent: View {
                        showsProgress: false, showsReconnect: true)
                 .staggeredAppear(index: 8)
         case .live:
-            if let reading = live.machineReading {
+            if !statusOnly, let reading = live.machineReading {
                 metricCard(reading)
                     .staggeredAppear(index: 8)
             }

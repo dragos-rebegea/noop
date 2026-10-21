@@ -80,8 +80,11 @@ public enum PowerMetrics {
 
     /// Present, non-negative power values in time order.
     static func powerSeries(_ samples: [MachineSample]) -> [(t: Int, w: Int)] {
-        samples.compactMap { s in s.powerW.flatMap { $0 >= 0 ? (s.t, $0) : nil } }
-            .sorted { $0.t < $1.t }
+        let series: [(t: Int, w: Int)] = samples.compactMap { s in s.powerW.flatMap { $0 >= 0 ? (s.t, $0) : nil } }
+        // The recorder appends in time order, so the sort is normally skipped (the live screen calls
+        // this every second over the whole ride).
+        let ordered = zip(series, series.dropFirst()).allSatisfy { $0.t <= $1.t }
+        return ordered ? series : series.sorted { $0.t < $1.t }
     }
 
     /// Mean power over the samples in the 3 seconds ending at `t` (`t - 2 ... t`). With no `t` the
@@ -237,5 +240,55 @@ public enum PowerMetrics {
     /// FTP from a 20 minute test mean: 95 % of it, rounded to the nearest watt.
     public static func ftpFromTwentyMinute(mean: Double) -> Int {
         Int((mean * 0.95).rounded())
+    }
+}
+
+/// Every ride figure the live bike screen and the ride summary show, resolved once from the samples so
+/// the two screens cannot disagree about the same number.
+public struct RideSummary: Equatable, Sendable {
+    public let avgPowerW: Double?
+    public let maxPowerW: Int?
+    public let normalizedPowerW: Double?
+    public let intensityFactor: Double?
+    public let tss: Double?
+    public let variabilityIndex: Double?
+    public let kilojoules: Double
+    public let avgCadence: Double?
+    /// Aerobic decoupling percent; nil until eligible.
+    public let decouplingPct: Double?
+    /// Seconds in Z1 ... Z7 (all zero without FTP).
+    public let zoneSeconds: [Int]
+    /// Best mean power per `PowerMetrics.summaryWindows` entry.
+    public let bestPowers: [Int: Double]
+    /// Count of power samples (moving seconds).
+    public let powerSeconds: Int
+    /// The FTP these figures were computed against.
+    public let ftpW: Int?
+
+    /// Builds the summary. `hr` is on the sample time axis (seconds from the workout start).
+    public init(samples: [MachineSample], hr: [PowerHRPoint], ftp: Int?) {
+        let np = PowerMetrics.normalizedPower(samples)
+        let avg = PowerMetrics.averagePower(samples)
+        let cadence = samples.compactMap(\.cadence)
+        avgPowerW = avg
+        maxPowerW = PowerMetrics.maxPower(samples)
+        normalizedPowerW = np
+        intensityFactor = PowerMetrics.intensityFactor(np: np, ftp: ftp)
+        tss = PowerMetrics.tss(samples, ftp: ftp)
+        variabilityIndex = np.flatMap { n in avg.flatMap { $0 > 0 ? n / $0 : nil } }
+        kilojoules = PowerMetrics.kilojoules(samples)
+        avgCadence = cadence.isEmpty ? nil : cadence.reduce(0, +) / Double(cadence.count)
+        decouplingPct = PowerMetrics.decoupling(power: samples, hr: hr)
+        zoneSeconds = PowerMetrics.timeInPowerZones(samples, ftp: ftp)
+        var best: [Int: Double] = [:]
+        for (window, watts) in PowerMetrics.bestPowers(samples) { if let watts { best[window] = watts } }
+        bestPowers = best
+        powerSeconds = PowerMetrics.powerSeries(samples).count
+        ftpW = ftp
+    }
+
+    /// Heart-rate samples (unix seconds) moved onto the sample axis of a workout starting at `startSec`.
+    public static func hrPoints(_ hr: [HRSample], startSec: Int) -> [PowerHRPoint] {
+        hr.map { PowerHRPoint(t: $0.ts - startSec, bpm: Double($0.bpm)) }
     }
 }

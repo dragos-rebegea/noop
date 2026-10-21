@@ -149,3 +149,23 @@ final class PowerMetricsTests: XCTestCase {
         XCTAssertEqual(PowerMetrics.ftpFromTwentyMinute(mean: 300), 285)
     }
 }
+
+final class RideSummaryTests: XCTestCase {
+    func testSummaryMatchesTheIndividualMetrics() {
+        let s = (0..<1800).map { MachineSample(t: $0, powerW: ($0 / 60) % 2 == 0 ? 150 : 250, cadence: 90) }
+        let hr = RideSummary.hrPoints((0..<1800).map { HRSample(ts: 1_000 + $0, bpm: 140) }, startSec: 1_000)
+        let r = RideSummary(samples: s, hr: hr, ftp: 250)
+        XCTAssertEqual(r.avgPowerW, PowerMetrics.averagePower(s))
+        XCTAssertEqual(r.normalizedPowerW, PowerMetrics.normalizedPower(s))
+        XCTAssertEqual(r.tss, PowerMetrics.tss(s, ftp: 250))
+        XCTAssertEqual(r.variabilityIndex!, PowerMetrics.variabilityIndex(s)!, accuracy: 1e-12)
+        XCTAssertEqual(r.kilojoules, 360, accuracy: 1e-9)
+        XCTAssertEqual(r.avgCadence, 90)
+        XCTAssertEqual(r.zoneSeconds.reduce(0, +), 1800)
+        XCTAssertEqual(r.bestPowers[60], 250)
+        XCTAssertNil(r.bestPowers[1200 + 2400])
+        XCTAssertNil(r.decouplingPct, "t = 0 ... 1799 leaves 1199 s after the warm-up, one short of eligible")
+        XCTAssertEqual(r.powerSeconds, 1800)
+        XCTAssertEqual(hr.first?.t, 0)
+    }
+}

@@ -131,8 +131,29 @@ final class AppModel: ObservableObject {
         var machineName: String?
         /// Completed laps marked on the bike layout; the open lap runs from the last `endT` to now.
         var laps: [MachineLap] = []
+        /// Fuelling reminders fired so far, and how many of them the rider has dismissed.
+        var fuelRemindersFired = 0
+        var fuelRemindersSeen = 0
 
         var isPaused: Bool { pausedAt != nil }
+
+        /// True for an indoor-bike companion ride that has reported power: the live screen switches to
+        /// the bike layout. Sticky once power has been seen, so a dropped link keeps the layout.
+        var isBikeRide: Bool {
+            usesCompanion && lastMachineReading?.kind == .indoorBike && machineSamples.contains { $0.powerW != nil }
+        }
+
+        /// Whether a fuelling reminder banner is waiting to be dismissed.
+        var fuelReminderPending: Bool { fuelRemindersFired > fuelRemindersSeen }
+
+        /// Advances the fuelling reminder count for the active (pause-excluded) elapsed time and says
+        /// whether a new reminder just became due. `intervalMin` 0 turns reminders off.
+        mutating func checkFuelReminder(intervalMin: Int, at now: Date = Date()) -> Bool {
+            let due = BikeTrainingPrefs.fuelRemindersDue(elapsedSec: Int(elapsed(at: now)), intervalMin: intervalMin)
+            guard due > fuelRemindersFired else { return false }
+            fuelRemindersFired = due
+            return true
+        }
 
         /// Adds a heart-rate sample unless this second already has one, and says whether it did.
         ///
@@ -948,7 +969,9 @@ final class AppModel: ObservableObject {
                 lastMachineReading: w.lastMachineReading,
                 machineName: w.machineName,
                 machineTotals: w.machineTotals,
-                laps: w.laps))
+                laps: w.laps,
+                fuelRemindersFired: w.fuelRemindersFired,
+                fuelRemindersSeen: w.fuelRemindersSeen))
     }
 
     /// If a manual workout was in flight when iOS killed the app, rebuild `activeWorkout` from the durable
@@ -973,6 +996,8 @@ final class AppModel: ObservableObject {
         w.machineTotals.breakSegment()
         w.machineName = snap.machineName
         w.laps = snap.laps ?? []
+        w.fuelRemindersFired = snap.fuelRemindersFired ?? 0
+        w.fuelRemindersSeen = snap.fuelRemindersSeen ?? 0
         activeWorkout = w
 
         // Rebuild the transient GPS lifecycle flag as well as the durable workout value. Without this,
@@ -1216,6 +1241,18 @@ final class AppModel: ObservableObject {
             return
         }
         w.machineName = live.machineName ?? w.machineName
+        let fuelDue = w.lastMachineReading?.kind == .indoorBike
+            && w.checkFuelReminder(intervalMin: BikeTrainingPrefs.fuelIntervalMin())
+        activeWorkout = w
+        persistActiveWorkout()
+        if fuelDue { buzz(loops: 2, gate: HapticPrefs.workout) }
+    }
+
+    /// Dismisses the fuelling reminder banner on the bike layout.
+    func dismissFuelReminder() {
+        guard var w = activeWorkout, w.fuelReminderPending else { return }
+        foldPendingMachine(into: &w)
+        w.fuelRemindersSeen = w.fuelRemindersFired
         activeWorkout = w
         persistActiveWorkout()
     }

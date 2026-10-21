@@ -36,6 +36,8 @@ enum ActiveWorkoutPersistence {
         var machineName: String? = nil
         var machineTotals: MachineTotals? = nil
         var laps: [MachineLap]? = nil
+        var fuelRemindersFired: Int? = nil
+        var fuelRemindersSeen: Int? = nil
     }
 
     /// The single `UserDefaults` key (JSON-encoded `Snapshot`). Namespaced like `moments`/`sleepMarks`.
@@ -73,6 +75,8 @@ enum ActiveWorkoutPersistence {
             machineName: raw.machineName,
             machineTotals: raw.machineTotals,
             laps: raw.laps.map { $0.filter { $0.startT >= 0 && $0.endT > $0.startT } },
+            fuelRemindersFired: raw.fuelRemindersFired.map { max(0, $0) },
+            fuelRemindersSeen: raw.fuelRemindersSeen.map { max(0, $0) },
         )
     }
 

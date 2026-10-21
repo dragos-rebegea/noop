@@ -397,6 +397,24 @@ public enum StrandPalette {
         return hrZones[z]
     }
 
+    /// The seven Coggan power zones (Z1 recovery grey, Z2 endurance blue, Z3 tempo green, Z4 threshold
+    /// yellow, Z5 VO2max orange, Z6 anaerobic red, Z7 neuromuscular purple), the conventional cycling
+    /// order so a rider coming from a head unit reads the colours the way they already do.
+    public static let powerZones: [Color] = [
+        Color(light: "#828D9B", dark: "#9AA7B5"),
+        Color(light: "#3A80D6", dark: "#4A90E2"),
+        Color(light: "#2E9E4F", dark: "#46B45A"),
+        Color(light: "#CFA528", dark: "#F2C53D"),
+        Color(light: "#D87328", dark: "#EE8B3C"),
+        Color(light: "#CB3A2F", dark: "#E5483B"),
+        Color(light: "#6A4FC0", dark: "#8E6FD6"),
+    ]
+
+    /// Colour for a power zone 1...7 (clamped).
+    public static func powerZoneColor(_ zone: Int) -> Color {
+        powerZones[max(1, min(7, zone)) - 1]
+    }
+
     /// Color for a sleep stage by canonical name (awake/light/deep/rem).
     public static func sleepStageColor(_ stage: SleepStage) -> Color {
         switch stage {
