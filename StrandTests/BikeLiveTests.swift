@@ -1,5 +1,6 @@
 import XCTest
 import WhoopProtocol
+import WhoopStore
 @testable import Strand
 
 final class BikeLiveTests: XCTestCase {
@@ -44,5 +45,18 @@ final class BikeLiveTests: XCTestCase {
             startSec: 1_000_000, sport: "Indoor cycle", samples: [], avgHr: 0, peakHr: 0, liveStrain: 0,
             fuelRemindersFired: 2, fuelRemindersSeen: 1)
         XCTAssertEqual(ActiveWorkoutPersistence.decode(ActiveWorkoutPersistence.encode(snap)), snap)
+    }
+
+    func testDetailShowsRideSummaryOnlyForBikeWithPower() {
+        func row(_ kind: String) -> WorkoutMachineRow {
+            WorkoutMachineRow(deviceId: "d", startTs: 1, machineKind: kind, machineName: nil, avgPowerW: nil,
+                              maxPowerW: nil, avgCadence: nil, distanceM: nil, energyKcal: nil, elapsedS: nil,
+                              samplesJSON: "[]")
+        }
+        let power = [MachineSample(t: 0, powerW: 120)]
+        XCTAssertTrue(WorkoutDetailView.isBikeRide(row("indoorBike"), samples: power))
+        XCTAssertFalse(WorkoutDetailView.isBikeRide(row("rower"), samples: power))
+        XCTAssertFalse(WorkoutDetailView.isBikeRide(row("indoorBike"), samples: [MachineSample(t: 0, cadence: 80)]))
+        XCTAssertFalse(WorkoutDetailView.isBikeRide(nil, samples: power))
     }
 }

@@ -64,6 +64,9 @@ struct WorkoutDetailView: View {
 
     @State private var machine: WorkoutMachineRow?
     @State private var machineSamples: [MachineSample] = []
+    @State private var machineLaps: [MachineLap] = []
+    /// Per-second HR on the machine-sample axis, loaded only for a bike ride (decoupling, lap HR).
+    @State private var rideHR: [PowerHRPoint] = []
 
     /// Drives the GPX/FIT export chooser for the recorded route.
     @State private var showRouteExport = false
@@ -89,7 +92,15 @@ struct WorkoutDetailView: View {
                        topBackground: liquidScaffoldSky()) {
             headerCard
             statStrip
-            machineStats
+            if isBikeRide, let machine {
+                RideSummarySection(machine: machine, samples: machineSamples, hr: rideHR, laps: machineLaps,
+                                   weightKg: profile.weightIsSet ? profile.weightKg : nil,
+                                   machineDistance: machine.distanceM.flatMap {
+                                       shouldShowMachineDistance($0) ? distanceLabel(Double($0)) : nil
+                                   })
+            } else {
+                machineStats
+            }
             machinePowerChart
             machineCadenceChart
             routeCard
@@ -130,6 +141,15 @@ struct WorkoutDetailView: View {
             guard let data = $0.samplesJSON.data(using: .utf8) else { return nil }
             return try? JSONDecoder().decode([MachineSample].self, from: data)
         } ?? []
+        let decodedLaps: [MachineLap] = machineRow?.lapsJSON.flatMap {
+            guard let data = $0.data(using: .utf8) else { return nil }
+            return try? JSONDecoder().decode([MachineLap].self, from: data)
+        } ?? []
+        var ridePoints: [PowerHRPoint] = []
+        if Self.isBikeRide(machineRow, samples: decodedMachineSamples) {
+            let hr = await repo.workoutHrSamples(from: row.startTs, to: row.endTs, source: row.source)
+            ridePoints = RideSummary.hrPoints(hr, startSec: row.startTs)
+        }
 
         // HR curve over the exact session window — a finer bucket than the 24h chart so a short run
         // still reads as a curve, not a handful of points.
@@ -178,6 +198,8 @@ struct WorkoutDetailView: View {
             self.route = routePoints
             self.machine = machineRow
             self.machineSamples = decodedMachineSamples
+            self.machineLaps = decodedLaps
+            self.rideHR = ridePoints
             self.hrPoints = points
             self.zoneMinutes = minutes
             self.zonesFromImport = fromImport
@@ -391,6 +413,13 @@ struct WorkoutDetailView: View {
                 ])
             }
         }
+    }
+
+    private var isBikeRide: Bool { Self.isBikeRide(machine, samples: machineSamples) }
+
+    /// An indoor-bike companion ride with power gets the ride summary instead of the plain machine tiles.
+    static func isBikeRide(_ machine: WorkoutMachineRow?, samples: [MachineSample]) -> Bool {
+        machine?.machineKind == FTMSMachineKind.indoorBike.rawValue && samples.contains { $0.powerW != nil }
     }
 
     private func shouldShowMachineDistance(_ distance: Int) -> Bool {

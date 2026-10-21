@@ -169,3 +169,21 @@ final class RideSummaryTests: XCTestCase {
         XCTAssertEqual(hr.first?.t, 0)
     }
 }
+
+final class LapStatsTests: XCTestCase {
+    func testPerLapFiguresComeFromTheSamplesInsideEachLap() {
+        let samples = (0..<120).map { MachineSample(t: $0, powerW: $0 < 60 ? 100 : 300, cadence: $0 < 60 ? 80 : 100) }
+        let hr = (0..<120).map { PowerHRPoint(t: $0, bpm: $0 < 60 ? 120 : 160) }
+        let laps = [MachineLap(index: 1, startT: 0, endT: 60), MachineLap(index: 2, startT: 60, endT: 120)]
+        let stats = LapStats.compute(laps: laps, samples: samples, hr: hr)
+        XCTAssertEqual(stats.count, 2)
+        XCTAssertEqual(stats[0].avgPowerW, 100)
+        XCTAssertEqual(stats[1].avgPowerW, 300)
+        XCTAssertEqual(stats[1].normalizedPowerW!, 300, accuracy: 1e-9)
+        XCTAssertEqual(stats[0].avgHR, 120)
+        XCTAssertEqual(stats[1].avgCadence, 100)
+        let short = LapStats.compute(laps: [MachineLap(index: 1, startT: 0, endT: 20)], samples: samples, hr: [])
+        XCTAssertNil(short[0].normalizedPowerW)
+        XCTAssertNil(short[0].avgHR)
+    }
+}

@@ -68,4 +68,12 @@ enum BikeTrainingPrefs {
         guard intervalMin > 0, elapsedSec > 0 else { return 0 }
         return elapsedSec / (intervalMin * 60)
     }
+
+    /// Whether a ride's FTP estimate is worth offering as an update: always when no FTP is set, else
+    /// only when it differs from the current one by more than 3 %.
+    static func suggestsFTPUpdate(estimate: Int?, current: Int?) -> Bool {
+        guard let estimate, ftpRange.contains(estimate) else { return false }
+        guard let current, current > 0 else { return true }
+        return abs(Double(estimate - current)) / Double(current) > 0.03
+    }
 }

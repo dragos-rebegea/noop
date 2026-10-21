@@ -3355,6 +3355,15 @@ final class Repository: ObservableObject {
         return await hrBuckets(deviceIds: ids, from: from, to: to, bucketSeconds: bucket)
     }
 
+    /// Raw per-second HR samples for a workout window, read from the same device ids as the chart and
+    /// zones (`workoutHrDeviceIds`). Feeds the ride summary's aerobic decoupling and per-lap HR.
+    func workoutHrSamples(from: Int, to: Int, source: String = "") async -> [HRSample] {
+        guard to > from else { return [] }
+        let ids = Self.workoutHrDeviceIds(source: source, activeStrapId: deviceId,
+                                          importedIds: importedReadIds)
+        return await hrSamples(deviceIds: ids, from: from, to: to, limit: max(8000, to - from + 60))
+    }
+
     /// Raw HR samples binned into per-zone MINUTES for a workout window, using the age-derived
     /// (Tanaka) %HRmax zones , the same display zone model `WorkoutsView` already uses for imported
     /// zone percentages, but computed here from the strap's own samples so a session WITHOUT imported

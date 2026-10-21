@@ -43,6 +43,15 @@ final class BikeTrainingPrefsTests: XCTestCase {
         XCTAssertEqual(BikeTrainingPrefs.fuelRemindersDue(elapsedSec: 5000, intervalMin: 0), 0)
     }
 
+    func testFTPUpdateSuggestion() {
+        XCTAssertTrue(BikeTrainingPrefs.suggestsFTPUpdate(estimate: 240, current: nil))
+        XCTAssertFalse(BikeTrainingPrefs.suggestsFTPUpdate(estimate: 247, current: 240), "2.9 % is within 3 %")
+        XCTAssertTrue(BikeTrainingPrefs.suggestsFTPUpdate(estimate: 248, current: 240))
+        XCTAssertTrue(BikeTrainingPrefs.suggestsFTPUpdate(estimate: 230, current: 240))
+        XCTAssertFalse(BikeTrainingPrefs.suggestsFTPUpdate(estimate: nil, current: 240))
+        XCTAssertFalse(BikeTrainingPrefs.suggestsFTPUpdate(estimate: 20, current: nil), "out of range")
+    }
+
     private func makeDefaults() throws -> (UserDefaults, String) {
         let suite = "BikeTrainingPrefsTests." + UUID().uuidString
         return (try XCTUnwrap(UserDefaults(suiteName: suite)), suite)

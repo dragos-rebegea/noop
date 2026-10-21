@@ -21,6 +21,9 @@ final class ProfileStore: ObservableObject {
     }
     @Published var sex: String { didSet { d.set(sex, forKey: K.sex) } }          // "male" | "female" | "nonbinary"
     @Published var weightKg: Double { didSet { d.set(weightKg, forKey: K.weight) } }
+    /// Whether the rider has ever stored a weight (`weightKg` reads a 75 kg default otherwise), so
+    /// figures like W/kg only show when the number is the user's own.
+    var weightIsSet: Bool { d.object(forKey: K.weight) != nil }
     @Published var heightCm: Double { didSet { d.set(heightCm, forKey: K.height) } }
     /// Optional waist circumference (cm); 0 = not set. Only used to ALSO show an estimated VO₂max
     /// alongside Fitness Age — the Fitness Age itself does not need it (the body term cancels).

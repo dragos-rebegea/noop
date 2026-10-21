@@ -292,3 +292,26 @@ public struct RideSummary: Equatable, Sendable {
         hr.map { PowerHRPoint(t: $0.ts - startSec, bpm: Double($0.bpm)) }
     }
 }
+
+/// Figures for one marked lap, derived from the ride's samples at display time (never stored).
+public struct LapStats: Equatable, Sendable {
+    public let lap: MachineLap
+    public let avgPowerW: Double?
+    public let normalizedPowerW: Double?
+    public let avgHR: Double?
+    public let avgCadence: Double?
+
+    /// One entry per lap, in order. `hr` is on the sample time axis.
+    public static func compute(laps: [MachineLap], samples: [MachineSample], hr: [PowerHRPoint]) -> [LapStats] {
+        laps.map { lap in
+            let s = lap.samples(from: samples)
+            let h = hr.filter { $0.t >= lap.startT && $0.t < lap.endT && $0.bpm > 0 }.map(\.bpm)
+            let c = s.compactMap(\.cadence)
+            return LapStats(lap: lap,
+                            avgPowerW: PowerMetrics.averagePower(s),
+                            normalizedPowerW: PowerMetrics.normalizedPower(s),
+                            avgHR: h.isEmpty ? nil : h.reduce(0, +) / Double(h.count),
+                            avgCadence: c.isEmpty ? nil : c.reduce(0, +) / Double(c.count))
+        }
+    }
+}
